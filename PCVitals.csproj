@@ -25,6 +25,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The test project lives in tests/ under this folder; keep its sources out of the app. -->
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+    <InternalsVisibleTo Include="PCVitals.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Compact aggressively and give memory back to the OS rather than keeping it for reuse. -->
     <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
     <RuntimeHostConfigurationOption Include="System.GC.RetainVM" Value="false" />
@@ -35,7 +42,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" />
+    <!-- Exact version: HardwareService relies on a few of its internals (see the *Gate classes).
+         Re-check those, and the log, before upgrading. -->
+    <PackageReference Include="LibreHardwareMonitorLib" Version="[0.9.6]" />
   </ItemGroup>
 
 </Project>

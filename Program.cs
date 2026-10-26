@@ -581,6 +581,7 @@ static class Program
         public IReadOnlyDictionary<string, float> PowerRatios => new Dictionary<string, float> { ["NVIDIA GeForce RTX 5080"] = 3.98f };
         public void SettingsChanged() { }
         public void RecalibrateGpuPower() { }
+        public int ExportHistory(string path) => 0;
         public void ReopenSettings(string page) { }
     }
 }

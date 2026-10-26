@@ -20,10 +20,14 @@ sealed class DashboardView : Control
         SensorType.Throughput, SensorType.Level, SensorType.Energy, SensorType.Factor, SensorType.TimeSpan,
     };
 
-    static readonly int[] Ranges = { 60, 300, 900 };
+    // Up to 15 min uses per-refresh samples; 1 h and 24 h use one-minute averages.
+    static readonly int[] Ranges = { 60, 300, 900, 3600, 86400 };
     static readonly Color TempLine = Color.FromArgb(255, 150, 90);
 
-    enum ProcessSort { None, Cpu, Memory }
+    enum ProcessSort { None, Cpu, Memory, Gpu }
+
+    /// <summary>Pages with a process list; only these pay for process (and per-process GPU) sampling.</summary>
+    static bool ShowsProcesses(string page) => page is "overview" or "cpu" or "memory" || page.StartsWith("gpu:", StringComparison.Ordinal);
 
     sealed class Page
     {
@@ -49,7 +53,7 @@ sealed class DashboardView : Control
     readonly AppSettings _settings;
     readonly bool _isAdmin;
     readonly ProcessStats _procs = new();
-    readonly List<(Rectangle Rect, Action Action)> _hits = new();
+    readonly List<(Rectangle Rect, Action Action, string Name)> _hits = new();
 
     Snapshot? _snap;
     float _scroll;
@@ -70,6 +74,8 @@ sealed class DashboardView : Control
 
     /// <summary>Supplies long history for the big graph: (series key, sample count) → samples.</summary>
     public Func<string, int, float[]>? HistoryProvider { get; set; }
+    /// <summary>Supplies one-minute averages for the 1 h / 24 h ranges: (series key, minutes) → samples.</summary>
+    public Func<string, int, float[]>? MinuteHistoryProvider { get; set; }
     /// <summary>Overrides the machine name in the header (used for README screenshots).</summary>
     public string? MachineLabel { get; set; }
     public int ContentHeight => _contentHeight;
@@ -98,12 +104,12 @@ sealed class DashboardView : Control
     {
         _snap = snap;
         // Process sampling costs a syscall per refresh, so only while a page shows processes.
-        if (Visible && _settings.DashboardPage is "overview" or "cpu" or "memory") _procs.Sample();
+        if (Visible && ShowsProcesses(_settings.DashboardPage)) _procs.Sample(includeGpu: true);
         Invalidate();
     }
 
     /// <summary>Takes a process sample regardless of visibility (README previews).</summary>
-    internal void SampleProcessesNow() => _procs.Sample();
+    internal void SampleProcessesNow() => _procs.Sample(includeGpu: true);
 
     /// <summary>Opens the page for a taskbar item (or the overview). Returns true if the page changed.</summary>
     public bool ShowPage(WidgetKind? kind)
@@ -118,6 +124,7 @@ sealed class DashboardView : Control
             WidgetKind.Network => "network",
             WidgetKind.Board => "board",
             WidgetKind.Disk when s?.Disks.Count > 0 => "disk:" + s.Disks[0].Id,
+            WidgetKind.Battery when s?.Battery != null => "battery",
             null => null,
             _ => "overview",
         };
@@ -130,7 +137,7 @@ sealed class DashboardView : Control
         _settings.DashboardPage = key;
         _settings.Save();
         _scroll = 0;
-        if (key is "overview" or "cpu" or "memory") _procs.Sample();
+        if (ShowsProcesses(key)) _procs.Sample(includeGpu: true);
         Invalidate();
         return true;
     }
@@ -180,6 +187,7 @@ sealed class DashboardView : Control
                     : $"Graphics card{(g.VramTotalMb is { } vram ? $" · {vram / 1024:0} GB VRAM" : "")}",
                 RailValue = $"{Vitals.Pct(g.Load)} · {Fmt.Temp(g.Temp)}",
                 MainSeries = "gpu:" + g.Id, MainMax = 100, SecondSeries = "gputemp:" + g.Id, SecondLabel = "Temperature", SecondIsTemp = true,
+                Processes = ProcessSort.Gpu,
             };
             page.Readings.AddRange(snap.Hardware.Where(h => h.Id == g.Id));
             pages.Add(page);
@@ -241,7 +249,20 @@ sealed class DashboardView : Control
             pages.Add(page);
         }
 
-        foreach (var hw in snap.Hardware.Where(h => h.Type is HardwareType.Battery or HardwareType.Psu or HardwareType.Cooler or HardwareType.PowerMonitor))
+        if (s.Battery is { } battery && snap.Hardware.FirstOrDefault(h => h.Type == HardwareType.Battery) is { } batteryHw)
+        {
+            var view = Vitals.ForBattery(snap);
+            var page = new Page
+            {
+                Key = "battery", Name = "Battery", Glyph = "", Accent = Theme.Good, View = view, Sub = battery.Name,
+                HeaderSub = view?.TileSub, RailValue = $"{Vitals.Pct(battery.Charge)}{(view?.Line1 is { } l ? $" · {l}" : "")}",
+                MainSeries = "battery", MainLabel = "Charge", MainMax = 100,
+            };
+            page.Readings.Add(batteryHw);
+            pages.Add(page);
+        }
+
+        foreach (var hw in snap.Hardware.Where(h => h.Type is HardwareType.Psu or HardwareType.Cooler or HardwareType.PowerMonitor))
         {
             var page = new Page
             {
@@ -292,7 +313,12 @@ sealed class DashboardView : Control
 
         DrawHeader(g, w, headerH);
         DrawScrollbar(g);
+        DrawFocusRing(g);
         if (ClampScroll()) Invalidate();
+
+        // What a screen reader announces for the dashboard itself: the page and its key values.
+        var rows = page.View?.Rows.Select(r => $"{r.Label} {r.Value}") ?? Enumerable.Empty<string>();
+        _a11ySummary = string.Join(". ", new[] { page.View?.Device ?? page.Name }.Concat(rows));
     }
 
     void DrawHeader(Graphics g, int width, int height)
@@ -305,30 +331,45 @@ sealed class DashboardView : Control
         var uptime = Fmt.Duration(Environment.TickCount64 / 1000f);
         Gfx.Text(g, $"{MachineLabel ?? Environment.MachineName}  ·  up {uptime}", _f.Sub, Theme.TextDim, new Rectangle(pad, S(33), S(360), S(18)));
 
-        if (!_isAdmin)
+        // At most one banner: missing admin rights first, then a missing PawnIO driver.
+        (string Text, Action Action)? banner = null;
+        if (!_isAdmin) banner = ("Limited mode: click to restart as administrator", () => RestartAsAdminRequested?.Invoke());
+        else if (PawnIoMissing) banner = ("CPU temperature needs the free PawnIO driver: click to get it", OpenPawnIoSite);
+        if (banner is { } b)
         {
-            var warn = "Limited mode: click to restart as administrator";
-            int ww = Gfx.TextWidth(g, warn, _f.Small) + S(20);
+            int ww = Gfx.TextWidth(g, b.Text, _f.Small) + S(20);
             var r = new Rectangle((width - ww) / 2, S(16), ww, S(26));
             Gfx.FillRounded(g, r, S(13), Theme.WithAlpha(Theme.Warn, r.Contains(_mouse) ? 60 : 36));
-            Gfx.Text(g, warn, _f.Small, Theme.Warn, r, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-            _hits.Add((r, () => RestartAsAdminRequested?.Invoke()));
+            Gfx.Text(g, b.Text, _f.Small, Theme.Warn, r, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            _hits.Add((r, b.Action, b.Text));
         }
 
         int btn = S(32);
         var close = new Rectangle(width - pad - btn + S(6), S(13), btn, btn);
         var pin = new Rectangle(close.Left - btn - S(2), close.Top, btn, btn);
         var gear = new Rectangle(pin.Left - btn - S(2), close.Top, btn, btn);
-        DrawIconButton(g, close, "", Theme.TextDim, () => CloseRequested?.Invoke());
-        DrawIconButton(g, pin, Pinned ? "" : "", Pinned ? Theme.Cpu : Theme.TextDim, () => PinToggled?.Invoke());
-        DrawIconButton(g, gear, "", Theme.TextDim, () => SettingsRequested?.Invoke());
+        DrawIconButton(g, close, "", Theme.TextDim, "Close", () => CloseRequested?.Invoke());
+        DrawIconButton(g, pin, Pinned ? "" : "", Pinned ? Theme.Cpu : Theme.TextDim, Pinned ? "Unpin dashboard" : "Pin dashboard (keep it open)", () => PinToggled?.Invoke());
+        DrawIconButton(g, gear, "", Theme.TextDim, "Settings", () => SettingsRequested?.Invoke());
     }
 
-    void DrawIconButton(Graphics g, Rectangle r, string glyph, Color color, Action onClick)
+    public const string PawnIoUrl = "https://pawnio.eu/";
+
+    // Checked once per process; installing the driver needs an app restart anyway.
+    static readonly Lazy<bool> PawnIoMissingLazy = new(() => HardwareService.PawnIoStatus().Installed == false);
+    static bool PawnIoMissing => PawnIoMissingLazy.Value;
+
+    static void OpenPawnIoSite()
+    {
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(PawnIoUrl) { UseShellExecute = true }); }
+        catch { }
+    }
+
+    void DrawIconButton(Graphics g, Rectangle r, string glyph, Color color, string name, Action onClick)
     {
         if (r.Contains(_mouse)) Gfx.FillRounded(g, r, S(6), Theme.SurfaceHover);
         Gfx.Text(g, glyph, _f.Icon, color, r, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-        _hits.Add((r, onClick));
+        _hits.Add((r, onClick, name));
     }
 
     // ---- Rail -------------------------------------------------------------------------------
@@ -374,7 +415,7 @@ sealed class DashboardView : Control
             Gfx.Text(g, p.Sub ?? "", _f.Small, Theme.TextFaint, new Rectangle(tx, ty + lineH * 2, tw, lineH), TextFormatFlags.EndEllipsis);
 
             var key = p.Key;
-            _hits.Add((r, () => Navigate(key)));
+            _hits.Add((r, () => Navigate(key), $"{p.Name}{(p.Sub != null ? $" {p.Sub}" : "")}: {p.RailValue}"));
             y += entryH;
         }
     }
@@ -402,7 +443,7 @@ sealed class DashboardView : Control
         {
             var r = new Rectangle(x + (i % cols) * (tileW + gap), y + (i / cols) * (tileH + gap), tileW, tileH);
             DrawTile(g, r, tiles[i].View!);
-            if (tiles[i].Page is { } key) AddHit(r, () => Navigate(key));
+            if (tiles[i].Page is { } key) AddHit(r, () => Navigate(key), $"{tiles[i].View!.Title}: {tiles[i].View!.Primary ?? tiles[i].View!.Line2}, open details");
         }
         int rows = (tiles.Count + cols - 1) / cols;
         y += rows * tileH + Math.Max(0, rows - 1) * gap + S(18);
@@ -525,7 +566,7 @@ sealed class DashboardView : Control
         var tr = new Rectangle(x + w - tw - S(14), y - S(5), tw + S(14), S(24));
         if (tr.Contains(_mouse)) Gfx.FillRounded(g, tr, S(6), Theme.SurfaceHover);
         Gfx.Text(g, toggle, _f.Small, Theme.Cpu, tr, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-        AddHit(tr, () =>
+        AddHit(tr, toggle + " sensors", () =>
         {
             _settings.ShowAdvancedSensors = !_settings.ShowAdvancedSensors;
             _settings.Save();
@@ -546,10 +587,15 @@ sealed class DashboardView : Control
         Gfx.FillRounded(g, card, S(10), Theme.Surface);
 
         int seconds = _settings.GraphSeconds;
-        int samples = Math.Clamp(seconds * 1000 / Math.Max(100, _settings.IntervalMs), 2, HardwareService.LongHistoryLength);
-        float[] main = HistoryProvider?.Invoke(page.MainSeries!, samples) ?? _snap!.History.GetValueOrDefault(page.MainSeries!) ?? Array.Empty<float>();
+        bool minuteTier = seconds > 900;
+        int samples = minuteTier
+            ? Math.Clamp(seconds / 60, 2, HardwareService.MinuteHistoryLength)
+            : Math.Clamp(seconds * 1000 / Math.Max(100, _settings.IntervalMs), 2, HardwareService.LongHistoryLength);
+        int secondsPerSample = minuteTier ? 60 : Math.Max(1, _settings.IntervalMs / 1000);
+        var provider = minuteTier ? MinuteHistoryProvider : HistoryProvider;
+        float[] main = provider?.Invoke(page.MainSeries!, samples) ?? (minuteTier ? null : _snap!.History.GetValueOrDefault(page.MainSeries!)) ?? Array.Empty<float>();
         float[]? second = page.SecondSeries == null ? null
-            : HistoryProvider?.Invoke(page.SecondSeries, samples) ?? _snap!.History.GetValueOrDefault(page.SecondSeries);
+            : provider?.Invoke(page.SecondSeries, samples) ?? (minuteTier ? null : _snap!.History.GetValueOrDefault(page.SecondSeries));
 
         // Legend.
         int lx = x + S(16), ly = y + S(14);
@@ -561,13 +607,13 @@ sealed class DashboardView : Control
         for (int i = Ranges.Length - 1; i >= 0; i--)
         {
             int secs = Ranges[i];
-            var label = secs < 120 ? $"{secs / 60} min" : $"{secs / 60} min";
+            var label = secs >= 3600 ? $"{secs / 3600} h" : $"{secs / 60} min";
             int cw = Gfx.TextWidth(g, label, _f.Small) + S(18);
             var chip = new Rectangle(cx - cw, y + S(10), cw, S(24));
             bool on = seconds == secs;
             Gfx.FillRounded(g, chip, S(12), on ? Theme.WithAlpha(page.Accent, 60) : chip.Contains(_mouse) ? Theme.SurfaceHover : Theme.Bg);
             Gfx.Text(g, label, _f.Small, on ? Theme.Text : Theme.TextDim, chip, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-            AddHit(chip, () =>
+            AddHit(chip, $"Graph range {label}{(on ? ", selected" : "")}", () =>
             {
                 _settings.GraphSeconds = secs;
                 _settings.Save();
@@ -601,6 +647,9 @@ sealed class DashboardView : Control
         }
         Gfx.Text(g, $"{FormatRange(seconds)} ago", _f.Small, Theme.TextFaint, new Rectangle(plot.Left, plot.Bottom + S(4), S(120), S(18)));
         Gfx.Text(g, "now", _f.Small, Theme.TextFaint, new Rectangle(plot.Right - S(60), plot.Bottom + S(4), S(60), S(18)), TextFormatFlags.Right);
+        if (minuteTier && main.Length < 2)
+            Gfx.Text(g, "One-minute averages build up while PC Vitals runs (up to 24 hours).", _f.Small, Theme.TextDim, plot,
+                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
 
         var state = g.Save();
         g.SetClip(Rectangle.Inflate(plot, 0, 2), CombineMode.Intersect);
@@ -621,7 +670,7 @@ sealed class DashboardView : Control
                 using (var pen = new Pen(Theme.TextFaint)) g.DrawLine(pen, px, plot.Top, px, plot.Bottom);
                 var lines = new List<(string, Color)>
                 {
-                    ($"{FormatRange(fromRight * _settings.IntervalMs / 1000)} ago", Theme.TextDim),
+                    ($"{FormatRange(fromRight * secondsPerSample)} ago", Theme.TextDim),
                     ($"{page.MainLabel}: {(float.IsNaN(main[idx]) ? "—" : page.MainFormat(main[idx]))}", page.Accent),
                 };
                 if (second != null)
@@ -704,7 +753,12 @@ sealed class DashboardView : Control
         return 10 * pow;
     }
 
-    static string FormatRange(int seconds) => seconds >= 60 ? $"{seconds / 60} min{(seconds % 60 != 0 ? $" {seconds % 60} s" : "")}" : $"{seconds} s";
+    static string FormatRange(int seconds) => seconds switch
+    {
+        >= 3600 => $"{seconds / 3600} h{(seconds % 3600 / 60 != 0 ? $" {seconds % 3600 / 60} min" : "")}",
+        >= 60 => $"{seconds / 60} min{(seconds % 60 != 0 ? $" {seconds % 60} s" : "")}",
+        _ => $"{seconds} s",
+    };
 
     int DrawStatGrid(Graphics g, Page page, int x, int y, int w)
     {
@@ -766,17 +820,26 @@ sealed class DashboardView : Control
 
     int DrawProcesses(Graphics g, ProcessSort sort, int x, int y, int w, int count)
     {
-        var list = (sort == ProcessSort.Memory ? _procs.TopByMemory(count) : _procs.TopByCpu(count)).ToList();
+        var list = (sort switch
+        {
+            ProcessSort.Memory => _procs.TopByMemory(count),
+            ProcessSort.Gpu => _procs.TopByGpu(count),
+            _ => _procs.TopByCpu(count),
+        }).ToList();
+        bool showGpu = _procs.HasGpu;
         int rowH = S(26);
         var card = new Rectangle(x, y, w, S(70) + Math.Max(1, list.Count) * rowH);
         if (card.Bottom < _viewport.Top || card.Top > _viewport.Bottom) return card.Bottom;
         Gfx.FillRounded(g, card, S(10), Theme.Surface);
-        Gfx.Text(g, sort == ProcessSort.Memory ? "TOP PROCESSES BY MEMORY" : "TOP PROCESSES BY CPU", _f.Label, Theme.TextFaint,
-                 new Rectangle(x + S(16), y + S(14), w, S(16)));
+        var title = sort switch { ProcessSort.Memory => "TOP PROCESSES BY MEMORY", ProcessSort.Gpu => "TOP PROCESSES BY GPU", _ => "TOP PROCESSES BY CPU" };
+        Gfx.Text(g, title, _f.Label, Theme.TextFaint, new Rectangle(x + S(16), y + S(14), w, S(16)));
 
-        int memRight = x + w - S(16), cpuRight = memRight - S(110);
+        // Columns, right to left: memory, CPU, GPU (when per-process GPU data is available).
+        int memRight = x + w - S(16), cpuRight = memRight - S(110), gpuRight = cpuRight - S(90);
+        int nameRight = (showGpu ? gpuRight : cpuRight) - S(90);
         int hy = y + S(38);
         Gfx.Text(g, "NAME", _f.Label, Theme.TextFaint, new Rectangle(x + S(16), hy, S(200), S(16)));
+        if (showGpu) Gfx.Text(g, "GPU", _f.Label, Theme.TextFaint, new Rectangle(gpuRight - S(80), hy, S(80), S(16)), TextFormatFlags.Right);
         Gfx.Text(g, "CPU", _f.Label, Theme.TextFaint, new Rectangle(cpuRight - S(80), hy, S(80), S(16)), TextFormatFlags.Right);
         Gfx.Text(g, "MEMORY", _f.Label, Theme.TextFaint, new Rectangle(memRight - S(100), hy, S(100), S(16)), TextFormatFlags.Right);
 
@@ -784,15 +847,25 @@ sealed class DashboardView : Control
         if (list.Count == 0)
             Gfx.Text(g, "Collecting…", _f.Body, Theme.TextDim, new Rectangle(x + S(16), ry, w, rowH), TextFormatFlags.VerticalCenter);
         float maxCpu = Math.Max(1, list.Max(p => (float?)p.CpuPercent) ?? 1);
+        float maxGpu = Math.Max(1, list.Max(p => (float?)p.GpuPercent) ?? 1);
         long maxMem = Math.Max(1, list.Max(p => (long?)p.PrivateBytes) ?? 1);
         foreach (var p in list)
         {
             // Subtle bar showing the share of the leading resource.
-            float frac = sort == ProcessSort.Memory ? p.PrivateBytes / (float)maxMem : p.CpuPercent / maxCpu;
+            float frac = sort switch
+            {
+                ProcessSort.Memory => p.PrivateBytes / (float)maxMem,
+                ProcessSort.Gpu => p.GpuPercent / maxGpu,
+                _ => p.CpuPercent / maxCpu,
+            };
+            var barColor = sort switch { ProcessSort.Memory => Theme.Ram, ProcessSort.Gpu => Theme.Gpu, _ => Theme.Cpu };
             var bar = new Rectangle(x + S(8), ry + S(2), (int)((w - S(16)) * Math.Clamp(frac, 0, 1)), rowH - S(4));
-            if (bar.Width > S(8)) Gfx.FillRounded(g, bar, S(5), Theme.WithAlpha(sort == ProcessSort.Memory ? Theme.Ram : Theme.Cpu, 24));
+            if (bar.Width > S(8)) Gfx.FillRounded(g, bar, S(5), Theme.WithAlpha(barColor, 24));
             var name = p.Count > 1 ? $"{p.Name}  ({p.Count})" : p.Name;
-            Gfx.Text(g, name, _f.Body, Theme.Text, new Rectangle(x + S(16), ry, cpuRight - S(90) - x - S(16), rowH), TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            Gfx.Text(g, name, _f.Body, Theme.Text, new Rectangle(x + S(16), ry, nameRight - x - S(16), rowH), TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            if (showGpu)
+                Gfx.Text(g, $"{p.GpuPercent:0.0}%", _f.BodyBold, p.GpuPercent >= 10 ? Theme.Warn : Theme.Text,
+                         new Rectangle(gpuRight - S(80), ry, S(80), rowH), TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
             Gfx.Text(g, $"{p.CpuPercent:0.0}%", _f.BodyBold, p.CpuPercent >= 10 ? Theme.Warn : Theme.Text,
                      new Rectangle(cpuRight - S(80), ry, S(80), rowH), TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
             Gfx.Text(g, FormatBytes(p.PrivateBytes), _f.BodyBold, Theme.Text,
@@ -846,7 +919,7 @@ sealed class DashboardView : Control
             using var hover = new SolidBrush(Theme.SurfaceHover);
             g.FillPath(hover, path);
         }
-        AddHit(head, () =>
+        AddHit(head, $"{(collapsed ? "Expand" : "Collapse")} {gpu?.ShortName ?? hw.Name} sensors", () =>
         {
             if (!_settings.Collapsed.Remove(hw.Id)) _settings.Collapsed.Add(hw.Id);
             _settings.Save();
@@ -970,11 +1043,86 @@ sealed class DashboardView : Control
         Gfx.FillRounded(g, _thumb, S(2), active ? Theme.TextFaint : Theme.Border);
     }
 
-    void AddHit(Rectangle r, Action action)
+    void AddHit(Rectangle r, Action action, string name)
     {
         // Only register what is visible, so content scrolled under the header can't be clicked.
         var visible = Rectangle.Intersect(r, _viewport);
-        if (!visible.IsEmpty) _hits.Add((visible, action));
+        if (!visible.IsEmpty) _hits.Add((visible, action, name));
+    }
+
+    void AddHit(Rectangle r, string name, Action action) => AddHit(r, action, name);
+
+    // ---- Keyboard & screen readers -----------------------------------------------------------
+    // Everything clickable is a "hit" (rail entries, tiles, buttons, chips, section headers). Tab /
+    // Shift+Tab move a focus ring through them, Enter/Space activates, and each is exposed to
+    // screen readers as a named button.
+
+    int _focus = -1;
+    bool _keyboardFocus;
+    string _a11ySummary = "";
+
+    void MoveFocus(int delta)
+    {
+        if (_hits.Count == 0) return;
+        _keyboardFocus = true;
+        _focus = _focus < 0 ? (delta > 0 ? 0 : _hits.Count - 1) : (_focus + delta + _hits.Count) % _hits.Count;
+        Invalidate();
+        AccessibilityNotifyClients(AccessibleEvents.Focus, _focus);
+    }
+
+    void DrawFocusRing(Graphics g)
+    {
+        if (!_keyboardFocus || !Focused || _focus < 0 || _focus >= _hits.Count) return;
+        var r = Rectangle.Inflate(_hits[_focus].Rect, S(2), S(2));
+        using var path = Gfx.RoundedPath(r, S(8));
+        using var pen = new Pen(Theme.Cpu, Math.Max(2, S(2)));
+        g.DrawPath(pen, path);
+    }
+
+    protected override AccessibleObject CreateAccessibilityInstance() => new DashboardAccessible(this);
+
+    sealed class DashboardAccessible : ControlAccessibleObject
+    {
+        readonly DashboardView _view;
+
+        public DashboardAccessible(DashboardView view) : base(view) => _view = view;
+
+        public override AccessibleRole Role => AccessibleRole.Pane;
+        public override string? Name => "PC Vitals dashboard";
+        public override string? Description => _view._a11ySummary;
+        public override int GetChildCount() => _view._hits.Count;
+        public override AccessibleObject? GetChild(int index) =>
+            index >= 0 && index < _view._hits.Count ? new HitAccessible(_view, index, this) : null;
+        public override AccessibleObject? GetFocused() =>
+            _view._focus >= 0 && _view._focus < _view._hits.Count ? GetChild(_view._focus) : base.GetFocused();
+    }
+
+    sealed class HitAccessible : AccessibleObject
+    {
+        readonly DashboardView _view;
+        readonly int _index;
+        readonly AccessibleObject _parent;
+
+        public HitAccessible(DashboardView view, int index, AccessibleObject parent)
+        {
+            _view = view;
+            _index = index;
+            _parent = parent;
+        }
+
+        (Rectangle Rect, Action Action, string Name)? Hit => _index < _view._hits.Count ? _view._hits[_index] : null;
+        public override string? Name => Hit?.Name;
+        public override AccessibleRole Role => AccessibleRole.PushButton;
+        public override AccessibleObject? Parent => _parent;
+        public override string DefaultAction => "Press";
+        public override Rectangle Bounds => Hit is { } h ? _view.RectangleToScreen(h.Rect) : Rectangle.Empty;
+        public override AccessibleStates State =>
+            AccessibleStates.Focusable | (_view._focus == _index ? AccessibleStates.Focused : AccessibleStates.None);
+
+        public override void DoDefaultAction()
+        {
+            if (Hit is { } h) _view.BeginInvoke(h.Action);
+        }
     }
 
     // ---- Input ------------------------------------------------------------------------------
@@ -1010,10 +1158,23 @@ sealed class DashboardView : Control
     }
 
     protected override bool IsInputKey(Keys keyData) =>
-        (keyData & Keys.KeyCode) is Keys.Up or Keys.Down or Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End || base.IsInputKey(keyData);
+        (keyData & Keys.KeyCode) is Keys.Up or Keys.Down or Keys.PageUp or Keys.PageDown or Keys.Home or Keys.End or Keys.Tab
+        || base.IsInputKey(keyData);
 
     protected override void OnKeyDown(KeyEventArgs e)
     {
+        if (e.KeyCode == Keys.Tab)
+        {
+            MoveFocus(e.Shift ? -1 : 1);
+            e.Handled = true;
+            return;
+        }
+        if (e.KeyCode is Keys.Enter or Keys.Space && _keyboardFocus && _focus >= 0 && _focus < _hits.Count)
+        {
+            _hits[_focus].Action();
+            e.Handled = true;
+            return;
+        }
         if (e.Control && e.KeyCode is Keys.Up or Keys.Down)
         {
             CyclePage(e.KeyCode == Keys.Down ? 1 : -1);
@@ -1035,6 +1196,7 @@ sealed class DashboardView : Control
     {
         base.OnMouseDown(e);
         Focus();
+        _keyboardFocus = false; // the focus ring is for keyboard users; hide it once the mouse is used
         if (e.Button != MouseButtons.Left) return;
 
         if (!_thumb.IsEmpty && e.X >= ClientSize.Width - S(14) && e.Y >= _viewport.Top)
@@ -1093,7 +1255,7 @@ sealed class DashboardView : Control
             return;
         }
         if (e.Button != MouseButtons.Left) return;
-        foreach (var (rect, action) in _hits.ToList())
+        foreach (var (rect, action, _) in _hits.ToList())
         {
             if (!rect.Contains(e.Location)) continue;
             action();

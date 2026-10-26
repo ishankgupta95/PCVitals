@@ -26,8 +26,22 @@ sealed class ToggleSwitch : Control
             if (_checked == value) return;
             _checked = value;
             Invalidate();
+            AccessibilityNotifyClients(AccessibleEvents.StateChange, -1);
             CheckedChanged?.Invoke(this, EventArgs.Empty);
         }
+    }
+
+    protected override AccessibleObject CreateAccessibilityInstance() => new ToggleAccessible(this);
+
+    /// <summary>Reports as a check box (on/off) to screen readers.</summary>
+    sealed class ToggleAccessible : ControlAccessibleObject
+    {
+        readonly ToggleSwitch _owner;
+        public ToggleAccessible(ToggleSwitch owner) : base(owner) => _owner = owner;
+        public override AccessibleRole Role => AccessibleRole.CheckButton;
+        public override AccessibleStates State => base.State | (_owner.Checked ? AccessibleStates.Checked : AccessibleStates.None);
+        public override string DefaultAction => _owner.Checked ? "Turn off" : "Turn on";
+        public override void DoDefaultAction() => _owner.Checked = !_owner.Checked;
     }
 
     public ToggleSwitch()
@@ -109,7 +123,16 @@ sealed class Card : Control
         Size = new Size(600, 64);
         Margin = new Padding(0, 0, 0, 4);
         Tag = "stretch";
-        if (accessory != null) Controls.Add(accessory);
+        AccessibleRole = AccessibleRole.Grouping;
+        AccessibleName = title;
+        AccessibleDescription = description;
+        if (accessory != null)
+        {
+            // Screen readers announce the setting's title on its control (unless it already has a name).
+            foreach (var c in accessory is AccessoryRow row ? row.Controls.Cast<Control>() : new[] { accessory })
+                c.AccessibleName ??= title;
+            Controls.Add(accessory);
+        }
     }
 
     int TextLeft => Ui.S(this, _glyph != null ? 56 : 18);
@@ -176,8 +199,25 @@ sealed class Dropdown : Control
             if (value == _selected) return;
             _selected = value;
             Invalidate();
+            AccessibilityNotifyClients(AccessibleEvents.ValueChange, -1);
             SelectedIndexChanged?.Invoke(this, EventArgs.Empty);
         }
+    }
+
+    protected override AccessibleObject CreateAccessibilityInstance() => new DropdownAccessible(this);
+
+    sealed class DropdownAccessible : ControlAccessibleObject
+    {
+        readonly Dropdown _owner;
+        public DropdownAccessible(Dropdown owner) : base(owner) => _owner = owner;
+        public override AccessibleRole Role => AccessibleRole.ComboBox;
+        public override string? Value
+        {
+            get => _owner._items.Length > 0 ? _owner._items[_owner._selected] : null;
+            set { }
+        }
+        public override string DefaultAction => "Open";
+        public override void DoDefaultAction() => _owner.OnClick(EventArgs.Empty);
     }
 
     public Dropdown(string[] items, int selected, int width)
@@ -261,6 +301,8 @@ sealed class PillButton : Control
         TabStop = true;
         var f = UiFonts.For(96);
         Size = new Size(width > 0 ? width : TextRenderer.MeasureText(text, f.Body).Width + 32, 32);
+        AccessibleRole = AccessibleRole.PushButton;
+        if (!string.IsNullOrEmpty(text)) AccessibleName = text;
         Click += (_, _) => onClick();
     }
 
@@ -323,6 +365,13 @@ sealed class InputBox : Control
     public new event EventHandler? TextChanged;
     public string Value => _box.Text;
 
+    /// <summary>Name screen readers announce for the text field.</summary>
+    public string? FieldName
+    {
+        get => _box.AccessibleName;
+        set => _box.AccessibleName = value;
+    }
+
     protected override void OnLayout(LayoutEventArgs e)
     {
         base.OnLayout(e);
@@ -380,9 +429,64 @@ sealed class NavList : Control
 
     public NavList()
     {
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint |
+                 ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
         BackColor = Theme.Rail;
         Cursor = Cursors.Hand;
+        TabStop = true;
+        AccessibleName = "Settings pages";
+    }
+
+    // Keyboard: Up/Down (or Home/End) move between pages while the sidebar has focus.
+    protected override bool IsInputKey(Keys keyData) => keyData is Keys.Up or Keys.Down or Keys.Home or Keys.End || base.IsInputKey(keyData);
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        int i = _items.FindIndex(x => x.Key == Selected);
+        int next = e.KeyCode switch
+        {
+            Keys.Up => Math.Max(0, i - 1),
+            Keys.Down => Math.Min(_items.Count - 1, i + 1),
+            Keys.Home => 0,
+            Keys.End => _items.Count - 1,
+            _ => i,
+        };
+        if (next != i && next >= 0)
+        {
+            Select(_items[next].Key);
+            AccessibilityNotifyClients(AccessibleEvents.Focus, next);
+        }
+    }
+
+    protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+
+    protected override AccessibleObject CreateAccessibilityInstance() => new NavAccessible(this);
+
+    sealed class NavAccessible : ControlAccessibleObject
+    {
+        readonly NavList _owner;
+        public NavAccessible(NavList owner) : base(owner) => _owner = owner;
+        public override AccessibleRole Role => AccessibleRole.List;
+        public override int GetChildCount() => _owner._items.Count;
+        public override AccessibleObject? GetChild(int index) => index >= 0 && index < _owner._items.Count ? new Item(_owner, index, this) : null;
+        public override AccessibleObject? GetFocused() => GetChild(_owner._items.FindIndex(x => x.Key == _owner.Selected));
+
+        sealed class Item : AccessibleObject
+        {
+            readonly NavList _list;
+            readonly int _index;
+            readonly AccessibleObject _parent;
+            public Item(NavList list, int index, AccessibleObject parent) { _list = list; _index = index; _parent = parent; }
+            public override string? Name => _list._items[_index].Text;
+            public override AccessibleRole Role => AccessibleRole.ListItem;
+            public override AccessibleObject? Parent => _parent;
+            public override AccessibleStates State => AccessibleStates.Selectable |
+                (_list._items[_index].Key == _list.Selected ? AccessibleStates.Selected | AccessibleStates.Focused : AccessibleStates.None);
+            public override Rectangle Bounds => _list.RectangleToScreen(new Rectangle(0, _list.ItemTop(_index), _list.Width, Ui.S(_list, 36)));
+            public override void DoDefaultAction() => _list.Select(_list._items[_index].Key);
+        }
     }
 
     public void Add(string key, string text, string glyph) => _items.Add((key, text, glyph));
@@ -437,6 +541,12 @@ sealed class NavList : Control
                      TextFormatFlags.VerticalCenter | TextFormatFlags.HorizontalCenter);
             Gfx.Text(g, text, sel ? f.BodyBold : f.Body, Theme.Text, new Rectangle(r.Left + Ui.S(this, 44), r.Top, r.Width - Ui.S(this, 48), r.Height),
                      TextFormatFlags.VerticalCenter);
+            if (sel && Focused && ShowFocusCues)
+            {
+                using var path = Gfx.RoundedPath(Rectangle.Inflate(r, -1, -1), Ui.S(this, 6));
+                using var pen = new Pen(Theme.Text, Math.Max(1.5f, Ui.Scale(this) * 1.5f));
+                g.DrawPath(pen, path);
+            }
         }
     }
 
@@ -483,12 +593,24 @@ sealed class ThemeSwatch : Control
     {
         _name = name;
         _palette = palette;
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.Selectable, true);
         Size = new Size(140, 118);
         Cursor = Cursors.Hand;
         Margin = new Padding(0, 0, 12, 0);
+        TabStop = true;
+        AccessibleRole = AccessibleRole.RadioButton;
+        AccessibleName = name + " theme";
         Click += (_, _) => onClick();
     }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.KeyCode is Keys.Space or Keys.Enter) OnClick(EventArgs.Empty);
+    }
+
+    protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -527,7 +649,7 @@ sealed class ThemeSwatch : Control
             g.Restore(state);
         }
         using (var path = Gfx.RoundedPath(preview, Ui.S(this, 6)))
-        using (var pen = new Pen(Selected ? Theme.Cpu : _hover ? Theme.TextDim : Theme.Border, Selected ? Ui.S(this, 2) : 1))
+        using (var pen = new Pen(Selected ? Theme.Cpu : _hover || Focused ? Theme.TextDim : Theme.Border, Selected || Focused ? Ui.S(this, 2) : 1))
             g.DrawPath(pen, path);
         Gfx.Text(g, _name, Selected ? f.BodyBold : f.Body, Theme.Text, new Rectangle(0, preview.Bottom + Ui.S(this, 6), Width, Ui.S(this, 22)),
                  TextFormatFlags.HorizontalCenter);
@@ -599,13 +721,45 @@ sealed class ChoiceCard : Control
     public ChoiceCard(Func<(string Title, string? Detail, string? Tag)> content, Action onClick)
     {
         _content = content;
-        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint |
+                 ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
         Size = new Size(600, 60);
         Margin = new Padding(0, 0, 0, 4);
         Cursor = Cursors.Hand;
         Tag = "stretch";
+        TabStop = true;
+        AccessibleRole = AccessibleRole.RadioButton;
         Click += (_, _) => onClick();
     }
+
+    protected override AccessibleObject CreateAccessibilityInstance() => new ChoiceAccessible(this);
+
+    sealed class ChoiceAccessible : ControlAccessibleObject
+    {
+        readonly ChoiceCard _owner;
+        public ChoiceAccessible(ChoiceCard owner) : base(owner) => _owner = owner;
+        public override AccessibleRole Role => AccessibleRole.RadioButton;
+        public override string? Name
+        {
+            get
+            {
+                var (title, detail, tag) = _owner._content();
+                return string.Join(", ", new[] { title, tag?.ToLowerInvariant(), detail }.Where(s => !string.IsNullOrEmpty(s)));
+            }
+            set { }
+        }
+        public override AccessibleStates State => base.State | (_owner.Selected ? AccessibleStates.Checked : AccessibleStates.None);
+        public override void DoDefaultAction() => _owner.OnClick(EventArgs.Empty);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.KeyCode is Keys.Space or Keys.Enter) OnClick(EventArgs.Empty);
+    }
+
+    protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -615,10 +769,10 @@ sealed class ChoiceCard : Control
         var f = UiFonts.For(DeviceDpi);
         var r = new Rectangle(0, 0, Width - 1, Height - 1);
         Gfx.FillRounded(g, r, Ui.S(this, 8), _hover ? Theme.SurfaceHover : Theme.Surface);
-        if (Selected)
+        if (Selected || Focused)
         {
             using var path = Gfx.RoundedPath(r, Ui.S(this, 8));
-            using var pen = new Pen(Theme.Cpu, Ui.S(this, 2));
+            using var pen = new Pen(Selected ? Theme.Cpu : Theme.TextDim, Ui.S(this, 2));
             g.DrawPath(pen, path);
         }
 

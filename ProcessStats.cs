@@ -9,7 +9,11 @@ namespace PCVitals;
 /// </summary>
 sealed class ProcessStats
 {
-    public sealed record Entry(string Name, int Count, float CpuPercent, long PrivateBytes);
+    public sealed record Entry(string Name, int Count, float CpuPercent, long PrivateBytes, float GpuPercent);
+
+    readonly GpuProcessUsage _gpu = new();
+    /// <summary>True once per-process GPU usage has been read at least once.</summary>
+    public bool HasGpu { get; private set; }
 
     Dictionary<int, long> _lastCpu = new();
     long _lastTimestamp;
@@ -22,8 +26,11 @@ sealed class ProcessStats
     public int Threads { get; private set; }
     public int Handles { get; private set; }
 
-    public void Sample()
+    /// <param name="includeGpu">Also read per-process GPU usage (performance counters; a bit costlier).</param>
+    public void Sample(bool includeGpu = false)
     {
+        var gpu = includeGpu ? _gpu.Sample() : null;
+        if (gpu is { Count: > 0 }) HasGpu = true;
         int length;
         while (true)
         {
@@ -38,7 +45,7 @@ sealed class ProcessStats
         double capacity = elapsed100ns * Environment.ProcessorCount;
 
         var cpu = new Dictionary<int, long>(_lastCpu.Count + 16);
-        var groups = new Dictionary<string, (int Count, double Cpu, long Mem)>(StringComparer.OrdinalIgnoreCase);
+        var groups = new Dictionary<string, (int Count, double Cpu, long Mem, float Gpu)>(StringComparer.OrdinalIgnoreCase);
         int processes = 0, threads = 0, handles = 0;
 
         unsafe
@@ -71,7 +78,8 @@ sealed class ProcessStats
                             ? (cpuTime - prev) / capacity * 100
                             : 0;
                         var g = groups.GetValueOrDefault(name);
-                        groups[name] = (g.Count + 1, g.Cpu + used, g.Mem + privateWs);
+                        float gpuUsed = gpu != null && gpu.TryGetValue(pid, out var gu) ? gu : 0;
+                        groups[name] = (g.Count + 1, g.Cpu + used, g.Mem + privateWs, Math.Min(100, g.Gpu + gpuUsed));
                     }
                     if (next == 0) break;
                     offset += next;
@@ -84,11 +92,12 @@ sealed class ProcessStats
         Processes = processes;
         Threads = threads;
         Handles = handles;
-        Apps = groups.Select(kv => new Entry(kv.Key, kv.Value.Count, (float)kv.Value.Cpu, kv.Value.Mem)).ToList();
+        Apps = groups.Select(kv => new Entry(kv.Key, kv.Value.Count, (float)kv.Value.Cpu, kv.Value.Mem, kv.Value.Gpu)).ToList();
     }
 
     public IEnumerable<Entry> TopByCpu(int n) => Apps.Where(a => a.Name != "System Idle Process").OrderByDescending(a => a.CpuPercent).ThenByDescending(a => a.PrivateBytes).Take(n);
     public IEnumerable<Entry> TopByMemory(int n) => Apps.OrderByDescending(a => a.PrivateBytes).Take(n);
+    public IEnumerable<Entry> TopByGpu(int n) => Apps.OrderByDescending(a => a.GpuPercent).ThenByDescending(a => a.CpuPercent).Take(n);
 
     [DllImport("ntdll.dll")]
     static extern int NtQuerySystemInformation(int infoClass, byte[] buffer, int length, out int returnLength);

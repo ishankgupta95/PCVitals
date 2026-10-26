@@ -33,8 +33,12 @@ sealed class TaskbarWidget : Form
     public bool LightTaskbar { get; set; }
     public event Action<ItemView>? ItemClicked;
 
-    public TaskbarWidget(AppSettings settings, ContextMenuStrip menu)
+    readonly Func<TaskbarInfo?> _locate;
+
+    /// <param name="secondaryTaskbar">Handle of another display's taskbar, or zero for the main one.</param>
+    public TaskbarWidget(AppSettings settings, ContextMenuStrip menu, IntPtr secondaryTaskbar = default)
     {
+        _locate = secondaryTaskbar == IntPtr.Zero ? Native.FindTaskbar : () => Native.ReadSecondary(secondaryTaskbar);
         _settings = settings;
         _menu = menu;
         FormBorderStyle = FormBorderStyle.None;
@@ -76,7 +80,7 @@ sealed class TaskbarWidget : Form
             HideAll();
             return;
         }
-        var tb = Native.FindTaskbar();
+        var tb = _locate();
         if (tb == null || !tb.Horizontal || Native.FullscreenAppActive(tb.Handle))
         {
             HideAll();
@@ -145,56 +149,18 @@ sealed class TaskbarWidget : Form
     /// <summary>What auto-fit had to do on the last draw (for Settings), or null if everything fit.</summary>
     public string? FitNote { get; private set; }
 
-    /// <summary>
-    /// The free stretch of taskbar the strip may use: between the app icons and the tray, or, for
-    /// "left side", between the left edge and the icons (when there's room there).
-    /// </summary>
-    (int Left, int Right, bool AnchorLeft) FreeRegion(TaskbarInfo tb, float s)
-    {
-        int gap = (int)(8 * s);
-        int trayLeft = tb.Tray.Width > 0 ? tb.Tray.Left : tb.Bounds.Right - (int)(240 * s);
-        var icons = tb.Icons;
-        if (_settings.WidgetPosition == WidgetPosition.LeftSide && !icons.IsEmpty && icons.Left - tb.Bounds.Left > 160 * s)
-            return (tb.Bounds.Left + gap, icons.Left - gap, true);
-        int left = !icons.IsEmpty && icons.Right < trayLeft ? icons.Right + gap : tb.Bounds.Left + gap;
-        return (left, trayLeft - gap, _settings.WidgetPosition == WidgetPosition.LeftSide);
-    }
-
-    /// <summary>
-    /// Shrinks the strip until it fits its free region, so it never covers Start or app icons:
-    /// first hide graphs, then scale text down to 70%, then drop items from the end of the list.
-    /// </summary>
     (float Scale, bool Graphs, int Shown) Fit(List<ItemView> views, TaskbarInfo tb, float dpiScale)
     {
-        float scale = dpiScale * Math.Clamp(_settings.WidgetScale, 60, 150) / 100f;
-        bool graphs = _settings.WidgetGraphs;
-        FitNote = null;
-        if (views.Count == 0) return (scale, graphs, 0);
-
-        var (left, right, _) = FreeRegion(tb, dpiScale);
-        int available = right - left;
-        if (MeasureStrip(views, scale, graphs) <= available) return (scale, graphs, views.Count);
-
-        if (graphs && MeasureStrip(views, scale, false) <= available)
-        {
-            FitNote = "Graphs are hidden so the stats fit between the app icons and the tray.";
-            return (scale, false, views.Count);
-        }
-        graphs = false;
-        float min = dpiScale * 0.7f, step = dpiScale * 0.05f;
-        while (scale - step >= min && MeasureStrip(views, scale, false) > available) scale -= step;
-        int shown = views.Count;
-        while (shown > 1 && MeasureStrip(views.Take(shown).ToList(), scale, false) > available) shown--;
-        FitNote = shown < views.Count
-            ? $"{views.Count - shown} item{(views.Count - shown == 1 ? " is" : "s are")} hidden: there isn't room between the app icons and the tray. " +
-              "Turn some items off, make the strip smaller, or move it to the left side."
-            : "The stats were made smaller and graphs hidden so they fit between the app icons and the tray.";
-        return (scale, graphs, shown);
+        var (left, right, _) = StripFit.FreeRegion(tb, _settings.WidgetPosition, dpiScale);
+        var result = StripFit.Fit(views.Count, (n, scale, graphs) => MeasureStrip(views.Take(n).ToList(), scale, graphs),
+                                  right - left, dpiScale, _settings.WidgetScale, _settings.WidgetGraphs);
+        FitNote = result.Note;
+        return (result.Scale, result.Graphs, result.Shown);
     }
 
     Point Place(TaskbarInfo tb, int width, float s)
     {
-        var (left, right, anchorLeft) = FreeRegion(tb, s);
+        var (left, right, anchorLeft) = StripFit.FreeRegion(tb, _settings.WidgetPosition, s);
         int maxOffset = (int)(Math.Max(0, right - left - width) / s);
         _settings.WidgetOffset = Math.Clamp(_settings.WidgetOffset, 0, maxOffset);
         int offset = (int)(_settings.WidgetOffset * s);
@@ -218,7 +184,7 @@ sealed class TaskbarWidget : Form
     /// </summary>
     public bool CheckPlacement()
     {
-        var tb = Native.FindTaskbar();
+        var tb = _locate();
         bool autoHide = tb != null && IsAutoHidden(tb);
         var key = tb == null ? "none" : $"{tb.Bounds}|{tb.Tray.Left}|{tb.Icons}|{autoHide}|{Native.FullscreenAppActive(tb.Handle)}";
         if (key != _placementKey)

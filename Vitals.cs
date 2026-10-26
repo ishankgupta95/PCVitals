@@ -47,6 +47,7 @@ static class Vitals
         WidgetKind.Power => "Power draw (CPU + GPU)",
         WidgetKind.Board => "Motherboard / chipset",
         WidgetKind.Disk => "Storage",
+        WidgetKind.Battery => "Battery",
         _ => k.ToString(),
     };
 
@@ -57,6 +58,9 @@ static class Vitals
 
         switch (kind)
         {
+            case WidgetKind.Battery:
+                return ForBattery(snap, label);
+
             case WidgetKind.Cpu:
             {
                 if (s.CpuName == null) return null;
@@ -196,6 +200,35 @@ static class Vitals
             }
         }
         return null;
+    }
+
+    public static ItemView? ForBattery(Snapshot snap, string? label = null)
+    {
+        if (snap.Summary.Battery is not { } b) return null;
+        bool charging = b.RateW > 0.05f || (b.PluggedIn == true && b.Charge < 99.5f);
+        bool full = b.PluggedIn == true && b.Charge >= 99.5f;
+        string state = full ? "Plugged in, full" : charging ? "Charging" : b.PluggedIn == true ? "Plugged in" : "On battery";
+        string? time = b.RemainingSeconds is { } t && !full ? Fmt.Duration(t) : null;
+        var v = new ItemView
+        {
+            Kind = WidgetKind.Battery, Title = "Battery", Accent = Theme.Good, Label = label,
+            Device = b.Name, DeviceShort = b.Name,
+            Primary = Pct(b.Charge),
+            Line1 = b.RateW is { } r && Math.Abs(r) >= 0.1f ? $"{(r > 0 ? "+" : "−")}{Math.Abs(r):0.0} W" : charging ? "Charging" : full ? "Full" : null,
+            Line2 = time ?? (b.PluggedIn == true ? "plugged in" : null),
+            LineTemplates = new[] { "+99.9 W", "10h 59m" },
+            History = snap.History.TryGetValue("battery", out var h) ? h : null, HistoryMax = 100,
+            HistoryCaption = "Charge · last 90 seconds",
+            TileSub = $"{state}{(time != null ? $"  ·  {time} left" : "")}",
+        };
+        v.Rows.Add(new("Charge", Pct1(b.Charge)));
+        v.Rows.Add(new("State", state));
+        if (b.RateW is { } rate) v.Rows.Add(new(rate >= 0 ? "Charging at" : "Discharging at", $"{Math.Abs(rate):0.0} W"));
+        if (time != null) v.Rows.Add(new(charging ? "Time to full" : "Time remaining", time));
+        if (b.Wear is { } wear) v.Rows.Add(new("Wear", $"{wear:0}%", wear >= 30 ? Theme.Warn : null));
+        if (b.FullWh is { } fullWh) v.Rows.Add(new("Full capacity", b.DesignedWh is { } designed ? $"{fullWh:0.0} of {designed:0.0} Wh" : $"{fullWh:0.0} Wh"));
+        if (b.Voltage is { } volts) v.Rows.Add(new("Voltage", $"{volts:0.00} V"));
+        return v;
     }
 
     /// <summary>One drive's page/tile (the taskbar's Disk item aggregates all drives instead).</summary>

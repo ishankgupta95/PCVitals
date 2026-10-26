@@ -66,7 +66,58 @@ static class Native
         return child != IntPtr.Zero && GetWindowRect(child, out var r) ? r.ToRectangle() : Rectangle.Empty;
     }
 
-    /// <summary>True while a game/video covers the whole primary monitor, so the widget gets out of the way.</summary>
+    /// <summary>Rect of the first descendant (any depth) whose class is one of <paramref name="classes"/>.</summary>
+    static Rectangle DescendantRect(IntPtr parent, params string[] classes)
+    {
+        var found = Rectangle.Empty;
+        var sb = new StringBuilder(64);
+        EnumChildWindows(parent, (h, _) =>
+        {
+            sb.Clear();
+            GetClassName(h, sb, sb.Capacity);
+            if (Array.IndexOf(classes, sb.ToString()) < 0 || !IsWindowVisible(h) || !GetWindowRect(h, out var r)) return true;
+            found = r.ToRectangle();
+            return false;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    /// <summary>
+    /// Taskbars on other displays (when "Show my taskbar on all displays" is on). They have no
+    /// notification area; the clock, if shown, sits at the right edge.
+    /// </summary>
+    public static List<TaskbarInfo> FindSecondaryTaskbars()
+    {
+        var handles = new List<IntPtr>();
+        var sb = new StringBuilder(64);
+        EnumWindows((h, _) =>
+        {
+            sb.Clear();
+            GetClassName(h, sb, sb.Capacity);
+            if (sb.ToString() == "Shell_SecondaryTrayWnd" && IsWindowVisible(h)) handles.Add(h);
+            return true;
+        }, IntPtr.Zero);
+        return handles.Select(ReadSecondary).Where(t => t != null).Select(t => t!).ToList();
+    }
+
+    /// <summary>Re-reads one secondary taskbar's geometry; null if it went away.</summary>
+    public static TaskbarInfo? ReadSecondary(IntPtr handle)
+    {
+        if (!IsWindowVisible(handle) || !GetWindowRect(handle, out var r)) return null;
+        var bounds = r.ToRectangle();
+        var dpi = GetDpiForWindow(handle);
+        var clock = DescendantRect(handle, "ClockButton", "TrayClockWClass", "TrayNotifyWnd");
+        if (clock.IsEmpty)
+        {
+            // No clock found: keep a margin where Windows 11 may draw one.
+            int reserve = (int)(170 * (dpi == 0 ? 1 : dpi / 96f));
+            clock = new Rectangle(bounds.Right - reserve, bounds.Top, reserve, bounds.Height);
+        }
+        return new TaskbarInfo(handle, bounds, clock, DescendantRect(handle, "MSTaskListWClass", "ReBarWindow32"),
+                               DescendantRect(handle, "Start"), dpi == 0 ? 96 : (int)dpi);
+    }
+
+    /// <summary>True while a game/video covers the whole monitor this taskbar is on, so the widget gets out of the way.</summary>
     public static bool FullscreenAppActive(IntPtr taskbar)
     {
         var fg = GetForegroundWindow();
@@ -77,8 +128,17 @@ static class Native
         if (!GetWindowRect(fg, out var r)) return false;
         var screen = Screen.FromHandle(fg);
         var b = screen.Bounds;
-        return screen.Primary && r.Left <= b.Left && r.Top <= b.Top && r.Right >= b.Right && r.Bottom >= b.Bottom;
+        return screen.DeviceName == Screen.FromHandle(taskbar).DeviceName &&
+               r.Left <= b.Left && r.Top <= b.Top && r.Right >= b.Right && r.Bottom >= b.Bottom;
     }
+
+    delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    static extern bool EnumWindows(EnumProc callback, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    static extern bool EnumChildWindows(IntPtr parent, EnumProc callback, IntPtr lParam);
 
     /// <summary>Pushes a 32-bit ARGB bitmap to a layered window, giving per-pixel transparency.</summary>
     public static void SetLayeredBitmap(IntPtr hwnd, Bitmap bmp, Point pos)

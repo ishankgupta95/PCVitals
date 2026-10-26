@@ -15,6 +15,8 @@ interface ISettingsHost
     /// <summary>Settings were changed: save, apply, redraw.</summary>
     void SettingsChanged();
     void RecalibrateGpuPower();
+    /// <summary>Writes the one-minute history as CSV; returns the number of rows.</summary>
+    int ExportHistory(string path);
     /// <summary>Rebuilds the settings window (after a reset or theme change) on the given page.</summary>
     void ReopenSettings(string page);
 }
@@ -250,6 +252,8 @@ sealed class SettingsForm : Form
         });
         p.Controls.Add(new Card("Position", "Where the strip sits. You can also drag it sideways on the taskbar.",
                                 new AccessoryRow(position, reset), ""));
+        p.Controls.Add(new Card("Show on all displays", "Also show the stats on the taskbar of every other monitor (needs \"Show my taskbar on all displays\" in Windows settings).",
+                                Toggle(_s.ShowOnAllDisplays, v => _s.ShowOnAllDisplays = v), ""));
         p.Controls.Add(new Card("Keep visible when the taskbar auto-hides", "Shows the stats as a small floating bar at the bottom of the screen while an auto-hiding taskbar is tucked away.",
                                 Toggle(_s.FloatWhenTaskbarHidden, v => _s.FloatWhenTaskbarHidden = v), ""));
     }
@@ -264,6 +268,7 @@ sealed class SettingsForm : Form
         WidgetKind.Power => "CPU + graphics card power draw",
         WidgetKind.Board => "Chipset, VRM and system temperatures",
         WidgetKind.Disk => "Hottest drive, read and write speed",
+        WidgetKind.Battery => "Charge, charging or discharging watts, time left",
         _ => "",
     };
 
@@ -283,9 +288,13 @@ sealed class SettingsForm : Form
                 item.Label = label.Value.Trim();
                 Changed();
             };
-            var up = new PillButton("", () => MoveItem(index, -1), 34) { Glyph = "", Enabled = i > 0 };
-            var down = new PillButton("", () => MoveItem(index, +1), 34) { Glyph = "", Enabled = i < _s.WidgetItems.Count - 1 };
+            var name = Vitals.DisplayName(item.Kind);
+            label.FieldName = $"Label for {name}";
+            label.AccessibleName = $"Label for {name}";
+            var up = new PillButton("", () => MoveItem(index, -1), 34) { Glyph = "", Enabled = i > 0, AccessibleName = $"Move {name} up" };
+            var down = new PillButton("", () => MoveItem(index, +1), 34) { Glyph = "", Enabled = i < _s.WidgetItems.Count - 1, AccessibleName = $"Move {name} down" };
             var toggle = Toggle(item.Enabled, v => item.Enabled = v);
+            toggle.AccessibleName = $"Show {name} on the taskbar";
             host.Controls.Add(new Card(Vitals.DisplayName(item.Kind), Describe(item.Kind), new AccessoryRow(label, up, down, toggle)));
         }
         host.ResumeLayout();
@@ -511,11 +520,25 @@ sealed class SettingsForm : Form
         _usage = new Label { AutoSize = true, ForeColor = Theme.Text, BackColor = Theme.Surface, Text = SelfUsage() };
         p.Controls.Add(new Card("Resource use", "What PC Vitals itself is using right now.", _usage, ""));
 
+        var (pawnInstalled, pawnVersion) = HardwareService.PawnIoStatus();
+        p.Controls.Add(new Card("PawnIO driver", pawnInstalled switch
+        {
+            true => $"Installed{(pawnVersion != null ? $" (version {pawnVersion})" : "")}. CPU temperature, power and motherboard sensors are available.",
+            false => "Not installed. CPU temperature, power and motherboard sensors need this free, signed driver. Restart PC Vitals after installing it.",
+            _ => "Couldn't check whether the driver is installed.",
+        }, pawnInstalled == true ? null : new PillButton("Get PawnIO", () =>
+        {
+            try { Process.Start(new ProcessStartInfo(DashboardView.PawnIoUrl) { UseShellExecute = true }); }
+            catch { }
+        }) { Accent = true }, ""));
+
         p.Controls.Add(Section("Files"));
         var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PCVitals");
         p.Controls.Add(new Card("Settings and logs", dir, new AccessoryRow(
             new PillButton("Open folder", () => Process.Start(new ProcessStartInfo(dir) { UseShellExecute = true })),
             new PillButton("Save sensor report…", SaveReport)), ""));
+        p.Controls.Add(new Card("Export history", "One-minute averages of CPU, GPU, memory, power, network and drive readings for up to the last 24 hours, as a CSV file for Excel or other tools.",
+            new PillButton("Export CSV…", ExportHistory), ""));
 
         p.Controls.Add(Section("Credits"));
         p.Controls.Add(new Card("LibreHardwareMonitor", "Sensor access for CPUs, GPUs, motherboards, memory and drives. MPL-2.0 licence.", null, ""));
@@ -527,6 +550,30 @@ sealed class SettingsForm : Form
         var proc = Process.GetCurrentProcess();
         double cpu = proc.TotalProcessorTime.TotalMilliseconds / Math.Max(1, (DateTime.Now - proc.StartTime).TotalMilliseconds) * 100 / Environment.ProcessorCount;
         return $"{cpu:0.00}% CPU on average  ·  {proc.PrivateMemorySize64 / 1048576.0:0} MB memory";
+    }
+
+    void ExportHistory()
+    {
+        using var dialog = new SaveFileDialog
+        {
+            FileName = $"PC Vitals history {DateTime.Now:yyyy-MM-dd HHmm}.csv",
+            Filter = "CSV file|*.csv",
+            InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            int rows = _host.ExportHistory(dialog.FileName);
+            if (rows == 0)
+                MessageBox.Show(this, "There's no history yet: one-minute averages start building up a minute after PC Vitals starts.",
+                                "PC Vitals", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            else
+                Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{dialog.FileName}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "Couldn't export: " + ex.Message, "PC Vitals", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     void SaveReport()

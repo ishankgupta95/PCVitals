@@ -1,0 +1,58 @@
+name: Bug report
+description: Something is wrong or a sensor is missing
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Hardware differs a lot between PCs, so the sensor report below is the most useful thing you can attach.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you see instead? Screenshots help.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the dashboard
+        2. Click …
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Settings → System → About (e.g. Windows 11 24H2, build 26100)
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: CPU, GPU(s) and PC type
+      placeholder: e.g. Intel i7-13700H, NVIDIA RTX 4060 Laptop + Intel UHD, laptop
+  - type: dropdown
+    id: admin
+    attributes:
+      label: Running as administrator?
+      options:
+        - "Yes"
+        - "No (limited mode)"
+        - Not sure
+  - type: dropdown
+    id: pawnio
+    attributes:
+      label: PawnIO driver installed?
+      description: Settings → About shows this.
+      options:
+        - "Yes"
+        - "No"
+        - Not sure
+  - type: textarea
+    id: report
+    attributes:
+      label: Sensor report and error log
+      description: |
+        Settings → About → **Save sensor report…**, then drag the file here.
+        If something crashed or misbehaved, also attach `%APPDATA%\PCVitals\error.log`.

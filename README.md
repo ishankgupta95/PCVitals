@@ -19,8 +19,10 @@ for a dashboard of every sensor in your machine.
 ### On the taskbar
 - **Labelled readouts** with mini history graphs, drawn next to the clock.
   - Default layout: **CPU** (usage, temperature, power), **GPU** (usage, temperature, power), **MEM**, **NET**.
-  - Optional items: **PWR** (CPU + GPU draw), **iGPU** (the second GPU), **BOARD** (chipset/VRM temps), **SSD**.
+  - Optional items: **PWR** (CPU + GPU draw), **iGPU** (the second GPU), **BOARD** (chipset/VRM temps), **SSD**,
+    **BAT** (charge, charging/discharging watts, time left; switched on automatically on laptops).
   - Rename, reorder and toggle items; choose Small, Medium or Large; drag the strip sideways to move it.
+  - Optionally shown on every display's taskbar.
 - **Never covers your apps.** The strip measures the gap between the Start button / app icons and the tray, and
   if it doesn't fit it hides graphs, then shrinks, then hides trailing items. Settings tells you what it did.
 - Follows the taskbar's light/dark theme, steps aside for fullscreen games and video, and supports auto-hiding
@@ -31,10 +33,14 @@ for a dashboard of every sensor in your machine.
 ### Dashboard
 - **Device rail** with live thumbnails (CPU, each GPU, memory, each drive,
   network, motherboard, battery/PSU when present). Click a taskbar item to jump straight to its page.
-- **Big history graph** for 1, 5 or 15 minutes, with temperature overlaid on its own axis and a hover crosshair.
+- **Big history graph** for 1, 5 or 15 minutes, or 1 or 24 hours (one-minute averages), with temperature
+  overlaid on its own axis and a hover crosshair. Export the history as CSV from Settings → About.
 - **Stat tiles** per device: clocks, power vs. limit, hot spot / memory junction, VRAM, fan state, drive wear and
-  lifetime writes, DIMM temperatures, process/thread/handle counts and more.
-- **Top processes** by CPU or memory (grouped by app), and a per-thread CPU load graph.
+  lifetime writes, DIMM temperatures, battery wear and capacity, process/thread/handle counts and more.
+- **Top processes** by CPU, memory or GPU (grouped by app, with a per-app GPU column), and a per-thread CPU load
+  graph.
+- **Keyboard and screen reader friendly**: Tab / Shift+Tab move through everything clickable, Enter activates,
+  and every control has a name for screen readers (in Settings too).
 - **Every sensor** LibreHardwareMonitor can read, with min/max. Noisy ones (per-engine D3D load, power-connector
   pins, memory timings) stay hidden until you ask for them.
 - **Overview page** with system information: Windows version, CPU, GPUs, memory modules, motherboard, drives.
@@ -63,7 +69,15 @@ No network access, no telemetry. Settings live in `%APPDATA%\PCVitals\settings.j
   asks once at startup; if you decline it runs in a limited mode (GPU, load, memory and network still work).
 - The **[PawnIO](https://pawnio.eu/) driver** for CPU and motherboard sensors. LibreHardwareMonitor uses it in
   place of the old WinRing0 driver, which Windows Defender now blocks. If you already use a recent
-  LibreHardwareMonitor, FanControl or similar tool, it is probably installed.
+  LibreHardwareMonitor, FanControl or similar tool, it is probably installed. PC Vitals checks for it: if it's
+  missing you get a one-time notification, a banner in the dashboard and its status in Settings → About, each
+  with a link to install it. Restart PC Vitals afterwards.
+
+### "Windows protected your PC"
+
+The released exe isn't code-signed (signing certificates cost money), so Windows SmartScreen may warn about an
+unrecognised app the first time you run it. Click **More info → Run anyway**. If you'd rather not, build it
+yourself from source with the commands below; it's the same code.
 
 ## Build and run
 
@@ -76,6 +90,12 @@ publish\PCVitals.exe
 
 For a single exe that doesn't need the .NET runtime installed (much larger), use `--self-contained true`.
 
+Run the unit tests (taskbar fit rules, settings migration, GPU detection, formatting):
+
+```bash
+dotnet test tests/PCVitals.Tests
+```
+
 ### Using it
 
 | Action | Result |
@@ -86,6 +106,7 @@ For a single exe that doesn't need the .NET runtime installed (much larger), use
 | Drag the taskbar strip sideways | Move it (Settings → Taskbar → Reset puts it back) |
 | Right-click the strip or tray icon | Menu: dashboard, settings, refresh rate, start with Windows, exit |
 | Ctrl+↑ / Ctrl+↓ in the dashboard | Previous / next device |
+| Tab / Shift+Tab, Enter in the dashboard | Move between and activate buttons, devices and tiles |
 
 On Windows 11, new tray icons start in the overflow (`^`) menu. The taskbar strip doesn't need this, but you
 can drag the PC Vitals icon onto the taskbar if you like.
@@ -139,7 +160,11 @@ PCVitals.exe --replace                       # replace a running instance with t
 PCVitals.exe --no-elevate                    # skip the admin prompt (limited mode)
 ```
 
-Unexpected errors are written to `%APPDATA%\PCVitals\error.log`.
+Unexpected errors are written to `%APPDATA%\PCVitals\error.log`. The same log notes, once, if a sensor poll fails
+or one of the memory/CPU optimisations can't be applied (for example after a LibreHardwareMonitor update), so a
+quiet loss of efficiency doesn't go unnoticed. The library version is pinned for that reason.
+
+Found a bug? Please [open an issue](../../issues/new/choose) and attach the sensor report from Settings → About.
 
 ## Project layout
 
@@ -147,9 +172,10 @@ Unexpected errors are written to `%APPDATA%\PCVitals\error.log`.
 |---|---|
 | `HardwareService.cs` | Owns LibreHardwareMonitor, polls on a background thread, builds snapshots, summaries and history |
 | `NvmlFeed.cs` | Helper process that streams NVML readings while the dashboard is open |
-| `ProcessStats.cs` | Top processes by CPU and memory |
+| `ProcessStats.cs` / `GpuProcessUsage.cs` | Top processes by CPU, memory and GPU |
 | `Vitals.cs` | Turns a snapshot into display items (labels, values, detail rows) shared by every view |
-| `TaskbarWidget.cs` | The per-pixel-alpha layered window drawn on the taskbar, and its auto-fit |
+| `TaskbarWidget.cs` / `StripFit.cs` | The per-pixel-alpha layered window drawn on the taskbar, and its fit rules |
+| `tests/PCVitals.Tests` | Unit tests (xUnit) |
 | `HoverCard.cs` | Detail card shown when hovering a taskbar item |
 | `DashboardForm.cs` / `DashboardView.cs` | The dashboard window (owner-drawn) |
 | `SettingsForm.cs` / `SettingsControls.cs` | Settings window and its toggle, card, dropdown and preview controls |

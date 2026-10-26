@@ -28,6 +28,9 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     readonly HardwareService _hw = new(lean: true);
     readonly DashboardForm _dash;
     readonly TaskbarWidget _widget;
+    // Strips on other displays' taskbars, keyed by taskbar window (when "Show on all displays" is on).
+    readonly Dictionary<IntPtr, TaskbarWidget> _extraWidgets = new();
+    int _placementTicks;
     readonly ContextMenuStrip _menu;
     readonly Hotkeys _hotkeys = new();
     readonly System.Windows.Forms.Timer _placementTimer = new() { Interval = 1000 };
@@ -45,13 +48,14 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     bool _calibrationStarted;
     string? _hotkeyRegistered;
     WidgetKind? _alertPage;
+    Action? _balloonClick;
 
     public TrayContext(AppSettings settings, bool isAdmin)
     {
         _settings = settings;
         _isAdmin = isAdmin;
 
-        _dash = new DashboardForm(settings, isAdmin) { HistoryProvider = _hw.GetHistory };
+        _dash = new DashboardForm(settings, isAdmin) { HistoryProvider = _hw.GetHistory, MinuteHistoryProvider = _hw.GetMinuteHistory };
         _ = _dash.Handle; // create the window now so we can marshal sensor updates onto the UI thread
         _dash.RestartAsAdminRequested += RestartElevated;
         _dash.SettingsRequested += () => OpenSettings();
@@ -81,6 +85,9 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         {
             if (_exiting || _widget.IsDisposed) return;
             _placementTimer.Interval = _widget.CheckPlacement() ? 150 : 1000;
+            foreach (var extra in _extraWidgets.Values) extra.CheckPlacement();
+            // Displays come and go rarely; look for added/removed taskbars every few seconds.
+            if (++_placementTicks % 5 == 0) SyncExtraWidgets();
         };
         _placementTimer.Start();
 
@@ -111,6 +118,40 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         _hw.NeedStorage = Shown(WidgetKind.Disk);
         _hw.NeedBoard = Shown(WidgetKind.Board);
         _hw.NeedSecondGpu = Shown(WidgetKind.SecondGpu);
+        _hw.NeedBattery = Shown(WidgetKind.Battery);
+    }
+
+    void SyncExtraWidgets()
+    {
+        var wanted = _settings.WidgetEnabled && _settings.ShowOnAllDisplays
+            ? Native.FindSecondaryTaskbars().Select(t => t.Handle).ToHashSet()
+            : new HashSet<IntPtr>();
+        foreach (var handle in _extraWidgets.Keys.Where(h => !wanted.Contains(h)).ToList())
+        {
+            var w = _extraWidgets[handle];
+            _extraWidgets.Remove(handle);
+            w.AllowClose = true;
+            w.Close();
+            w.Dispose();
+        }
+        foreach (var handle in wanted.Where(h => !_extraWidgets.ContainsKey(h)))
+        {
+            var w = new TaskbarWidget(_settings, _menu, handle) { LightTaskbar = _taskbarLight };
+            w.ItemClicked += v => ToggleDashboard(v.Kind);
+            _extraWidgets[handle] = w;
+            if (_hw.Latest is { } snap) w.SetSnapshot(snap);
+        }
+    }
+
+    /// <summary>On a laptop, turn the battery item on the first time a battery shows up.</summary>
+    void EnableBatteryItemOnce(Snapshot snap)
+    {
+        if (_settings.BatteryItemAutoEnabled || snap.Summary.Battery == null) return;
+        _settings.BatteryItemAutoEnabled = true;
+        var item = _settings.WidgetItems.FirstOrDefault(i => i.Kind == WidgetKind.Battery);
+        if (item != null) item.Enabled = true;
+        _settings.Save();
+        SettingsChanged();
     }
 
     void ApplyHotkey()
@@ -127,12 +168,19 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         foreach (var metric in _icons.Keys) UpdateIcon(metric, snap.Summary);
         UpdateLogoTooltip(snap.Summary);
         _widget.SetSnapshot(snap);
+        foreach (var extra in _extraWidgets.Values) extra.SetSnapshot(snap);
         if (_dash.Visible) _dash.SetSnapshot(snap);
         _settingsForm?.SetSnapshot(snap);
         CheckAlerts(snap.Summary);
 
         _snapshots++;
-        if (_snapshots == 1) StartPowerCalibrationIfNeeded(snap);
+        if (_snapshots == 1)
+        {
+            StartPowerCalibrationIfNeeded(snap);
+            NoticeMissingPawnIo();
+        }
+        // The battery group is discovered with the deferred groups on the second poll.
+        if (_snapshots == 2) EnableBatteryItemOnce(snap);
         // Discovery (drives especially) allocates a lot once. The deferred groups are found on the
         // second poll, so give everything back after the third.
         if (_snapshots == 3) Native.TrimWorkingSet();
@@ -167,12 +215,31 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         ShowNotification(title, text(v), ToolTipIcon.Warning, page);
     }
 
-    void ShowNotification(string title, string text, ToolTipIcon icon, WidgetKind? page)
+    void ShowNotification(string title, string text, ToolTipIcon icon, WidgetKind? page, Action? onClick = null)
     {
         var notifyIcon = _logo ?? _icons.Values.FirstOrDefault();
         if (notifyIcon == null) return;
         _alertPage = page;
+        _balloonClick = onClick;
         notifyIcon.ShowBalloonTip(10000, title, text, icon);
+    }
+
+    /// <summary>
+    /// Without PawnIO, CPU temperature/power and motherboard sensors silently read nothing. Tell the
+    /// user once (the dashboard keeps a banner for it).
+    /// </summary>
+    void NoticeMissingPawnIo()
+    {
+        if (!_isAdmin || _settings.PawnIoNoticeShown || HardwareService.PawnIoStatus().Installed != false) return;
+        _settings.PawnIoNoticeShown = true;
+        _settings.Save();
+        ShowNotification("CPU temperatures need PawnIO",
+                         "Install the free PawnIO driver (click here), then restart PC Vitals to see CPU temperature, power and motherboard sensors.",
+                         ToolTipIcon.Info, null, () =>
+                         {
+                             try { Process.Start(new ProcessStartInfo(DashboardView.PawnIoUrl) { UseShellExecute = true }); }
+                             catch { }
+                         });
     }
 
     // ---- GPU power calibration --------------------------------------------------------------
@@ -276,12 +343,16 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         SyncIcons();
         foreach (var metric in _icons.Keys) UpdateIcon(metric, _hw.Latest?.Summary, force: true);
         _widget.Redraw(force: true);
+        SyncExtraWidgets();
+        foreach (var extra in _extraWidgets.Values) extra.Redraw(force: true);
         _dash.ApplyTheme();
         _widgetItem.Checked = _settings.WidgetEnabled;
         foreach (var (value, item) in _intervalItems) item.Checked = value == _settings.IntervalMs;
         // Last: may rebuild the settings window in the new colours.
         Theme.Apply(_settings.ColorTheme);
     }
+
+    public int ExportHistory(string path) => _hw.ExportCsv(path);
 
     public void RecalibrateGpuPower()
     {
@@ -348,7 +419,8 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         };
         icon.BalloonTipClicked += (_, _) =>
         {
-            if (_alertPage is { } page) ShowDashboard(page);
+            if (_balloonClick is { } click) click();
+            else if (_alertPage is { } page) ShowDashboard(page);
         };
         return icon;
     }
@@ -424,6 +496,11 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         _taskbarLight = light;
         _widget.LightTaskbar = light;
         _widget.Redraw(force: true);
+        foreach (var extra in _extraWidgets.Values)
+        {
+            extra.LightTaskbar = light;
+            extra.Redraw(force: true);
+        }
         foreach (var metric in _icons.Keys) UpdateIcon(metric, _hw.Latest?.Summary, force: true);
     }
 
@@ -613,6 +690,13 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             TrayIconRenderer.Destroy(_logoHandle);
         }
         _settingsForm?.Close();
+        foreach (var extra in _extraWidgets.Values)
+        {
+            extra.AllowClose = true;
+            extra.Close();
+            extra.Dispose();
+        }
+        _extraWidgets.Clear();
         _widget.AllowClose = true;
         _dash.AllowClose = true;
         if (!_widget.IsDisposed) _widget.Close();

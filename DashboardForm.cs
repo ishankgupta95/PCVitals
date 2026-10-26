@@ -89,6 +89,12 @@ sealed class DashboardForm : Form
         set => _view.HistoryProvider = value;
     }
 
+    public Func<string, int, float[]>? MinuteHistoryProvider
+    {
+        get => _view.MinuteHistoryProvider;
+        set => _view.MinuteHistoryProvider = value;
+    }
+
     /// <summary>Re-reads theme colours after the palette changed.</summary>
     public void ApplyTheme()
     {

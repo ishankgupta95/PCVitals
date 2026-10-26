@@ -123,6 +123,7 @@ static class Theme
             WidgetKind.Network => d.Net,
             WidgetKind.Power => d.Power,
             WidgetKind.Disk => d.Storage,
+            WidgetKind.Battery => d.Good,
             _ => d.Board,
         };
         return OnTaskbar(c, lightTaskbar);

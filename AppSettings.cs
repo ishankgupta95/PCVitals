@@ -34,6 +34,7 @@ public enum WidgetKind
     Power,
     Board,
     Disk,
+    Battery,
 }
 
 public enum WidgetPosition
@@ -68,6 +69,8 @@ public sealed class AppSettings
     public int WidgetOffset { get; set; }
     /// <summary>With an auto-hiding taskbar, keep the stats on screen as a floating pill.</summary>
     public bool FloatWhenTaskbarHidden { get; set; }
+    /// <summary>Also draw the strip on the taskbars of other displays.</summary>
+    public bool ShowOnAllDisplays { get; set; }
 
     public List<TrayMetric> TrayMetrics { get; set; } = new();
     public TrayIconStyle TrayStyle { get; set; } = TrayIconStyle.LabelAndNumber;
@@ -76,6 +79,10 @@ public sealed class AppSettings
     public int IntervalMs { get; set; } = 1000;
     public bool ShowAdvancedSensors { get; set; }
     public bool Fahrenheit { get; set; }
+    /// <summary>The one-time "install PawnIO" notification has been shown.</summary>
+    public bool PawnIoNoticeShown { get; set; }
+    /// <summary>The battery item was switched on automatically the first time a battery was seen.</summary>
+    public bool BatteryItemAutoEnabled { get; set; }
     public ThemeMode ColorTheme { get; set; } = ThemeMode.System;
     /// <summary>Taskbar strip size in percent of normal (it may still shrink further to fit).</summary>
     public int WidgetScale { get; set; } = 100;
@@ -107,17 +114,20 @@ public sealed class AppSettings
         new() { Kind = WidgetKind.SecondGpu, Enabled = false, Label = "iGPU" },
         new() { Kind = WidgetKind.Board, Enabled = false, Label = "BOARD" },
         new() { Kind = WidgetKind.Disk, Enabled = false, Label = "SSD" },
+        new() { Kind = WidgetKind.Battery, Enabled = false, Label = "BAT" },
     };
 
     public static AppSettings CreateDefault() => new() { Version = CurrentVersion };
 
-    public static AppSettings Load()
+    public static AppSettings Load() => LoadFrom(FilePath);
+
+    internal static AppSettings LoadFrom(string path)
     {
         AppSettings settings;
         try
         {
-            settings = File.Exists(FilePath)
-                ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath), Json) ?? new AppSettings { Version = CurrentVersion }
+            settings = File.Exists(path)
+                ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), Json) ?? new AppSettings { Version = CurrentVersion }
                 : new AppSettings { Version = CurrentVersion };
         }
         catch
@@ -128,9 +138,9 @@ public sealed class AppSettings
 
         if (settings.Version < CurrentVersion)
         {
-            // v1 only had tray number icons; move people onto the new taskbar widget layout.
+            // Settings from early builds only had tray number icons; start them on the taskbar layout.
             settings = new AppSettings { Version = CurrentVersion, IntervalMs = settings.IntervalMs, Collapsed = settings.Collapsed };
-            settings.Save();
+            settings.SaveTo(path);
         }
 
         // Keep the item list complete if new kinds were added in an update.
@@ -140,12 +150,14 @@ public sealed class AppSettings
         return settings;
     }
 
-    public void Save()
+    public void Save() => SaveTo(FilePath);
+
+    internal void SaveTo(string path)
     {
         try
         {
-            Directory.CreateDirectory(Dir);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, Json));
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, JsonSerializer.Serialize(this, Json));
         }
         catch (Exception ex)
         {

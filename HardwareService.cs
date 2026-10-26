@@ -61,6 +61,21 @@ public sealed class DiskSummary
     public float? WriteRate { get; init; }
 }
 
+public sealed class BatterySummary
+{
+    public required string Name { get; init; }
+    public float? Charge { get; init; }
+    /// <summary>Watts into (+) or out of (−) the battery.</summary>
+    public float? RateW { get; init; }
+    public float? RemainingSeconds { get; init; }
+    /// <summary>Capacity lost compared with new, in percent.</summary>
+    public float? Wear { get; init; }
+    public float? DesignedWh { get; init; }
+    public float? FullWh { get; init; }
+    public float? Voltage { get; init; }
+    public bool? PluggedIn { get; init; }
+}
+
 /// <summary>The headline numbers shown in the taskbar, tray, tiles and hover cards.</summary>
 public sealed class Summary
 {
@@ -100,6 +115,8 @@ public sealed class Summary
 
     public IReadOnlyList<DiskSummary> Disks { get; init; } = Array.Empty<DiskSummary>();
 
+    public BatterySummary? Battery { get; init; }
+
     /// <summary>CPU package plus discrete GPU board power: the two components that dominate system draw.</summary>
     public float? TotalPower
     {
@@ -126,6 +143,8 @@ public sealed class HardwareService : IDisposable
     public const int HistoryLength = 90;
     /// <summary>Samples kept for the dashboard's longest graph range (15 minutes at 1 s; ~3.6 KB per series).</summary>
     public const int LongHistoryLength = 900;
+    /// <summary>One-minute averages kept for the 1 h / 24 h graphs and CSV export (~5.6 KB per series).</summary>
+    public const int MinuteHistoryLength = 1440;
 
     static readonly HardwareType[] DisplayOrder =
     {
@@ -152,6 +171,11 @@ public sealed class HardwareService : IDisposable
     bool _deferredEnabled;
 
     readonly Dictionary<string, Ring> _history = new();
+    readonly Dictionary<string, Ring> _minutes = new();
+    readonly Dictionary<string, (double Sum, int Count)> _minuteAcc = new();
+    readonly DateTime[] _minuteStamps = new DateTime[MinuteHistoryLength];
+    int _minuteNext, _minuteStampCount;
+    DateTime _currentMinute;
     readonly AutoResetEvent _wake = new(false);
     Thread? _thread;
     volatile bool _running;
@@ -170,6 +194,8 @@ public sealed class HardwareService : IDisposable
     public bool NeedBoard { get; set; }
     /// <summary>True when the second-GPU item is on the taskbar, so the non-primary GPU is polled every tick.</summary>
     public bool NeedSecondGpu { get; set; }
+    /// <summary>True when the battery item is on the taskbar, so the battery is polled every tick.</summary>
+    public bool NeedBattery { get; set; }
     long _tick;
     string? _primaryGpuId;
     public event Action<Snapshot>? Updated;
@@ -196,6 +222,29 @@ public sealed class HardwareService : IDisposable
     /// <param name="lean">Skip NVML until the dashboard needs it (the tray app); diagnostics load everything.</param>
     public HardwareService(bool lean = false) => _lean = lean;
 
+    /// <summary>
+    /// Whether the PawnIO driver (needed for CPU temperature/power and motherboard sensors) is
+    /// installed, and its version. Null when it can't be determined.
+    /// </summary>
+    public static (bool? Installed, string? Version) PawnIoStatus()
+    {
+        try
+        {
+            bool installed = LibreHardwareMonitor.PawnIo.PawnIo.IsInstalled;
+            string? version = null;
+            if (installed)
+            {
+                try { version = LibreHardwareMonitor.PawnIo.PawnIo.Version?.ToString(); }
+                catch { }
+            }
+            return (installed, version);
+        }
+        catch
+        {
+            return (null, null);
+        }
+    }
+
     public void Start()
     {
         _running = true;
@@ -216,13 +265,24 @@ public sealed class HardwareService : IDisposable
                 var snap = UpdateOnce();
                 Updated?.Invoke(snap);
             }
-            catch
+            catch (Exception ex)
             {
-                // A misbehaving sensor driver must never take the tray app down.
+                // A misbehaving sensor driver must never take the tray app down, but leave a trace.
+                LogOnce("poll:" + ex.GetType().Name + ex.TargetSite?.Name, "Sensor poll failed (continuing): " + ex);
             }
             var elapsed = (int)(Environment.TickCount64 - started);
             _wake.WaitOne(Math.Max(50, IntervalMs - elapsed));
         }
+    }
+
+    static readonly HashSet<string> Logged = new();
+
+    /// <summary>Writes a diagnostic line to the app log the first time <paramref name="key"/> is seen.</summary>
+    internal static void LogOnce(string key, string message)
+    {
+        lock (Logged)
+            if (!Logged.Add(key)) return;
+        Program.Log(message);
     }
 
     public Snapshot UpdateOnce()
@@ -232,6 +292,13 @@ public sealed class HardwareService : IDisposable
             if (_lean) _nvmlBlocked = NvmlBlocker.Block();
             _computer.Open();
             _opened = true;
+            // The memory/CPU optimisations reach into LibreHardwareMonitor internals. If an update
+            // changed them the app still works, just heavier; make that visible in the log.
+            if (_lean && _computer.Hardware.Any(h => h.HardwareType == HardwareType.GpuNvidia))
+            {
+                if (!_nvmlBlocked) LogOnce("nvml-block", "Couldn't keep NVML unloaded (LibreHardwareMonitor internals changed?); expect ~20 MB more memory.");
+                if (!NvmlGate.IsAvailable) LogOnce("nvml-gate", "NVML power shortcut unavailable; background GPU polls will be slower.");
+            }
         }
         else if (!_deferredEnabled)
         {
@@ -259,6 +326,8 @@ public sealed class HardwareService : IDisposable
             .OrderBy(r => Rank(r.Type))
             .ToList();
 
+        // Close out the previous minute before this sample starts accumulating into the new one.
+        RollMinute(DateTime.Now);
         Push("cpu", summary.CpuLoad);
         Push("cputemp", summary.CpuTemp);
         Push("ram", summary.RamLoad);
@@ -268,6 +337,11 @@ public sealed class HardwareService : IDisposable
         Push("netup", summary.NetUp);
         Push("cpupower", summary.CpuPower);
         Push("chipset", summary.ChipsetTemp ?? summary.SystemTemp);
+        if (summary.Battery != null)
+        {
+            Push("battery", summary.Battery.Charge);
+            Push("batteryrate", summary.Battery.RateW);
+        }
         Push("disk", summary.Disks.Select(d => d.Temp).DefaultIfEmpty(null).Max());
         foreach (var d in summary.Disks)
         {
@@ -306,6 +380,7 @@ public sealed class HardwareService : IDisposable
                 HardwareType.Storage => DetailedMode ? 0 : NeedStorage ? 5000 : 30000,
                 HardwareType.Memory when hw.Sensors.Any(s => s.SensorType == SensorType.Timing) => DetailedMode ? 5000 : 15000,
                 HardwareType.Motherboard => DetailedMode || NeedBoard ? 0 : 3000,
+                HardwareType.Battery => DetailedMode || NeedBattery ? 0 : 5000,
                 HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel
                     when _primaryGpuId != null && hw.Identifier.ToString() != _primaryGpuId => DetailedMode || NeedSecondGpu ? 0 : 5000,
                 _ => 0,
@@ -341,7 +416,11 @@ public sealed class HardwareService : IDisposable
         {
             var type = hw.GetType();
             if (!Fields.TryGetValue(type, out var field))
+            {
                 Fields[type] = field = type.GetField("_d3dDeviceId", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (field == null && hw.HardwareType is HardwareType.GpuNvidia or HardwareType.GpuAmd)
+                    LogOnce("d3d:" + type.Name, $"D3D counter shortcut unavailable for {type.Name}; background GPU polls will be slower.");
+            }
             if (field == null || Broken.Contains(type) || field.GetValue(hw) is not string id)
             {
                 Inner(hw);
@@ -352,9 +431,10 @@ public sealed class HardwareService : IDisposable
             {
                 Inner(hw);
             }
-            catch
+            catch (Exception ex)
             {
                 Broken.Add(type); // library changed shape; stop gating this type
+                LogOnce("d3d-broken:" + type.Name, $"D3D counter shortcut disabled for {type.Name}: {ex.Message}");
                 field.SetValue(hw, id);
                 Inner(hw);
                 return;
@@ -388,6 +468,7 @@ public sealed class HardwareService : IDisposable
         static readonly FieldInfo? HandleField = DeviceField == null ? null
             : Nullable.GetUnderlyingType(DeviceField.FieldType)?.GetField("Handle", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
         static readonly bool Available = DeviceField != null && PowerField != null && HandleField != null && LoadNvml();
+        public static bool IsAvailable => Available;
 
         public static bool Applies(IHardware hw) => Available && hw.GetType() == GpuType;
 
@@ -455,7 +536,44 @@ public sealed class HardwareService : IDisposable
         {
             if (!_history.TryGetValue(key, out var ring)) _history[key] = ring = new Ring(LongHistoryLength);
             ring.Add(value ?? float.NaN);
+            if (value is { } v && float.IsFinite(v))
+            {
+                var acc = _minuteAcc.GetValueOrDefault(key);
+                _minuteAcc[key] = (acc.Sum + v, acc.Count + 1);
+            }
+            else
+            {
+                _minuteAcc.TryAdd(key, (0, 0));
+            }
         }
+    }
+
+    /// <summary>
+    /// Folds the samples of the minute that just ended into the long-term tier: one average per
+    /// series per minute, 24 hours deep.
+    /// </summary>
+    void RollMinute(DateTime now)
+    {
+        var minute = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, now.Kind);
+        if (_currentMinute == default)
+        {
+            _currentMinute = minute;
+            return;
+        }
+        if (minute == _currentMinute) return;
+        lock (_history)
+        {
+            foreach (var (key, acc) in _minuteAcc)
+            {
+                if (!_minutes.TryGetValue(key, out var ring)) _minutes[key] = ring = new Ring(MinuteHistoryLength);
+                ring.Add(acc.Count > 0 ? (float)(acc.Sum / acc.Count) : float.NaN);
+            }
+            _minuteAcc.Clear();
+            _minuteStamps[_minuteNext] = _currentMinute;
+            _minuteNext = (_minuteNext + 1) % MinuteHistoryLength;
+            _minuteStampCount = Math.Min(_minuteStampCount + 1, MinuteHistoryLength);
+        }
+        _currentMinute = minute;
     }
 
     /// <summary>The newest <paramref name="count"/> samples of a series (oldest first), for the dashboard graphs.</summary>
@@ -464,8 +582,65 @@ public sealed class HardwareService : IDisposable
         lock (_history) return _history.TryGetValue(key, out var ring) ? ring.Last(count) : Array.Empty<float>();
     }
 
+    /// <summary>The newest <paramref name="count"/> one-minute averages of a series (oldest first).</summary>
+    public float[] GetMinuteHistory(string key, int count)
+    {
+        lock (_history) return _minutes.TryGetValue(key, out var ring) ? ring.Last(count) : Array.Empty<float>();
+    }
+
+    /// <summary>
+    /// Writes the one-minute averages (up to 24 hours) as CSV: a timestamp column, then one column
+    /// per headline series, named for the device. Returns the number of rows written.
+    /// </summary>
+    public int ExportCsv(string path)
+    {
+        var s = _latest?.Summary;
+        var columns = new List<(string Key, string Title)>
+        {
+            ("cpu", "CPU usage (%)"), ("cputemp", "CPU temperature (°C)"), ("cpupower", "CPU power (W)"),
+            ("ram", "Memory usage (%)"), ("power", "CPU + GPU power (W)"),
+            ("netdown", "Download (B/s)"), ("netup", "Upload (B/s)"), ("chipset", "Chipset temperature (°C)"),
+        };
+        foreach (var g in s?.Gpus ?? Array.Empty<GpuSummary>())
+        {
+            columns.Add(("gpu:" + g.Id, $"{g.ShortName} usage (%)"));
+            columns.Add(("gputemp:" + g.Id, $"{g.ShortName} temperature (°C)"));
+            columns.Add(("gpupower:" + g.Id, $"{g.ShortName} power (W)"));
+        }
+        foreach (var d in s?.Disks ?? Array.Empty<DiskSummary>())
+            columns.Add(("disk:" + d.Id, $"{d.Name} temperature (°C)"));
+
+        DateTime[] stamps;
+        var data = new List<(string Title, float[] Values)>();
+        lock (_history)
+        {
+            stamps = new DateTime[_minuteStampCount];
+            int start = (_minuteNext - _minuteStampCount + MinuteHistoryLength) % MinuteHistoryLength;
+            for (int i = 0; i < stamps.Length; i++) stamps[i] = _minuteStamps[(start + i) % MinuteHistoryLength];
+            foreach (var (key, title) in columns)
+                if (_minutes.TryGetValue(key, out var ring)) data.Add((title, ring.Last(stamps.Length)));
+        }
+
+        static string Quote(string v) => v.Contains(',') || v.Contains('"') ? "\"" + v.Replace("\"", "\"\"") + "\"" : v;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        using var w = new StreamWriter(path, false, new System.Text.UTF8Encoding(true));
+        w.WriteLine(string.Join(",", new[] { "Time" }.Concat(data.Select(d => Quote(d.Title)))));
+        for (int i = 0; i < stamps.Length; i++)
+        {
+            var cells = new List<string> { stamps[i].ToString("yyyy-MM-dd HH:mm", inv) };
+            foreach (var (_, values) in data)
+            {
+                // Series that appeared later are shorter; align them to the newest minutes.
+                int j = values.Length - (stamps.Length - i);
+                cells.Add(j >= 0 && !float.IsNaN(values[j]) ? values[j].ToString("0.##", inv) : "");
+            }
+            w.WriteLine(string.Join(",", cells));
+        }
+        return stamps.Length;
+    }
+
     /// <summary>Fixed-size ring buffer: no per-sample allocation however long the history.</summary>
-    sealed class Ring
+    internal sealed class Ring
     {
         readonly float[] _data;
         int _next, _count;
@@ -588,6 +763,31 @@ public sealed class HardwareService : IDisposable
 
     static float? Positive(float? v) => v > 0 ? v : null;
 
+    static BatterySummary? SummarizeBattery(HardwareReading? b)
+    {
+        if (b == null) return null;
+        // LibreHardwareMonitor reports whichever of these the battery driver supports.
+        float? rate = b.Value(SensorType.Power, "Charge Rate") is { } c && c > 0 ? c
+                    : b.Value(SensorType.Power, "Discharge Rate") is { } d && d > 0 ? -d
+                    : b.Value(SensorType.Power, "Charge/Discharge Rate");
+        bool? plugged = null;
+        try { plugged = System.Windows.Forms.SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Online; }
+        catch { }
+        return new BatterySummary
+        {
+            Name = b.Name,
+            Charge = b.Value(SensorType.Level, "Charge Level"),
+            RateW = rate,
+            RemainingSeconds = Positive(b.Value(SensorType.TimeSpan, "Remaining Time")),
+            Wear = b.Value(SensorType.Level, "Degradation Level"),
+            // Capacities are reported in mWh.
+            DesignedWh = b.Value(SensorType.Energy, "Designed Capacity") / 1000,
+            FullWh = b.Value(SensorType.Energy, "Full Charged Capacity", "Fully-Charged Capacity", "Fully Charged Capacity") / 1000,
+            Voltage = b.Value(SensorType.Voltage, "Voltage"),
+            PluggedIn = plugged,
+        };
+    }
+
     // Windows exposes a pile of virtual/disconnected adapters; only show ones that have moved data.
     static bool IsIdleNetwork(HardwareReading r) =>
         r.Type == HardwareType.Network &&
@@ -602,7 +802,7 @@ public sealed class HardwareService : IDisposable
         return Regex.Replace(s, @"\s{2,}", " ").Trim();
     }
 
-    static bool IsIntegrated(HardwareReading g) =>
+    internal static bool IsIntegrated(HardwareReading g) =>
         g.Type != HardwareType.GpuNvidia &&
         (IntegratedGpuName.IsMatch(g.Name.Trim()) || (g.Value(SensorType.SmallData, "GPU Memory Total") ?? 0) is > 0 and < 2048);
 
@@ -678,6 +878,8 @@ public sealed class HardwareService : IDisposable
                           .FirstOrDefault();
 
         // Storage
+        var battery = SummarizeBattery(all.FirstOrDefault(h => h.Type == HardwareType.Battery));
+
         var disks = all.Where(h => h.Type == HardwareType.Storage).Select(d => new DiskSummary
         {
             Id = d.Id,
@@ -724,6 +926,7 @@ public sealed class HardwareService : IDisposable
             NetAdapter = busiest?.Name,
 
             Disks = disks,
+            Battery = battery,
         };
     }
 
