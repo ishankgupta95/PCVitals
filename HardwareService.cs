@@ -1,0 +1,746 @@
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
+using LibreHardwareMonitor.Hardware;
+
+namespace PCVitals;
+
+public sealed record SensorReading(string Name, SensorType Type, float? Value, float? Min, float? Max);
+
+public sealed record HardwareReading(string Id, string Name, HardwareType Type, IReadOnlyList<SensorReading> Sensors)
+{
+    public SensorReading? Find(SensorType type, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            var exact = Sensors.FirstOrDefault(s => s.Type == type && s.Value.HasValue &&
+                                                    s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (exact != null) return exact;
+        }
+        foreach (var name in names)
+        {
+            var partial = Sensors.FirstOrDefault(s => s.Type == type && s.Value.HasValue &&
+                                                      s.Name.Contains(name, StringComparison.OrdinalIgnoreCase));
+            if (partial != null) return partial;
+        }
+        return null;
+    }
+
+    public float? Value(SensorType type, params string[] names) => Find(type, names)?.Value;
+
+    public float? First(SensorType type) => Sensors.FirstOrDefault(s => s.Type == type && s.Value.HasValue)?.Value;
+}
+
+public sealed class GpuSummary
+{
+    public required string Id { get; init; }
+    public required string Name { get; init; }
+    public required string ShortName { get; init; }
+    public bool Integrated { get; init; }
+    public float? Load { get; init; }
+    public float? Temp { get; init; }
+    public float? HotSpot { get; init; }
+    public float? MemJunction { get; init; }
+    public float? Power { get; init; }
+    public float? PowerLimitPct { get; init; }
+    public float? CoreClock { get; init; }
+    public float? MemClock { get; init; }
+    public float? VramUsedMb { get; init; }
+    public float? VramTotalMb { get; init; }
+    public float? FanRpm { get; init; }
+    public float? FanPct { get; init; }
+}
+
+public sealed class DiskSummary
+{
+    public required string Id { get; init; }
+    public required string Name { get; init; }
+    public float? Temp { get; init; }
+    public float? UsedPct { get; init; }
+    public float? ReadRate { get; init; }
+    public float? WriteRate { get; init; }
+}
+
+/// <summary>The headline numbers shown in the taskbar, tray, tiles and hover cards.</summary>
+public sealed class Summary
+{
+    public string? CpuName { get; init; }
+    public string? CpuShortName { get; init; }
+    public float? CpuLoad { get; init; }
+    public float? CpuMaxCoreLoad { get; init; }
+    public float? CpuTemp { get; init; }
+    public float? CpuCcdTemp { get; init; }
+    public float? CpuPower { get; init; }
+    public float? CpuClock { get; init; }
+    public float? CpuEffectiveClock { get; init; }
+    public float? CpuFanRpm { get; init; }
+
+    public IReadOnlyList<GpuSummary> Gpus { get; init; } = Array.Empty<GpuSummary>();
+    /// <summary>The GPU shown as "GPU" everywhere: the user's choice, else the discrete card.</summary>
+    public GpuSummary? Gpu { get; init; }
+    /// <summary>The other GPU (usually the integrated one), if any.</summary>
+    public GpuSummary? SecondGpu { get; init; }
+
+    public float? RamUsedGb { get; init; }
+    public float? RamTotalGb { get; init; }
+    public float? RamLoad { get; init; }
+    public float? VirtualUsedGb { get; init; }
+    public float? VirtualTotalGb { get; init; }
+    public float? DimmTemp { get; init; }
+
+    public string? BoardName { get; init; }
+    public float? ChipsetTemp { get; init; }
+    public float? VrmTemp { get; init; }
+    public float? SystemTemp { get; init; }
+    public float? SocketTemp { get; init; }
+
+    public float? NetDown { get; init; }
+    public float? NetUp { get; init; }
+    public string? NetAdapter { get; init; }
+
+    public IReadOnlyList<DiskSummary> Disks { get; init; } = Array.Empty<DiskSummary>();
+
+    /// <summary>CPU package plus discrete GPU board power: the two components that dominate system draw.</summary>
+    public float? TotalPower
+    {
+        get
+        {
+            var parts = new[] { CpuPower }.Concat(Gpus.Where(g => !g.Integrated).Select(g => g.Power)).Where(p => p.HasValue).ToList();
+            return parts.Count == 0 ? null : parts.Sum(p => p!.Value);
+        }
+    }
+}
+
+public sealed record Snapshot(
+    DateTime Time,
+    IReadOnlyList<HardwareReading> Hardware,
+    Summary Summary,
+    IReadOnlyDictionary<string, float[]> History);
+
+/// <summary>
+/// Owns the LibreHardwareMonitor <see cref="Computer"/> and polls it on a background thread.
+/// All sensor access happens on that thread; the UI only ever sees immutable <see cref="Snapshot"/>s.
+/// </summary>
+public sealed class HardwareService : IDisposable
+{
+    public const int HistoryLength = 90;
+    /// <summary>Samples kept for the dashboard's longest graph range (15 minutes at 1 s; ~3.6 KB per series).</summary>
+    public const int LongHistoryLength = 900;
+
+    static readonly HardwareType[] DisplayOrder =
+    {
+        HardwareType.Cpu, HardwareType.GpuNvidia, HardwareType.GpuAmd, HardwareType.GpuIntel,
+        HardwareType.Memory, HardwareType.Motherboard, HardwareType.SuperIO, HardwareType.EmbeddedController,
+        HardwareType.Cooler, HardwareType.Psu, HardwareType.Storage, HardwareType.Network,
+        HardwareType.Battery, HardwareType.PowerMonitor,
+    };
+
+    static readonly Regex IntegratedGpuName = new(@"Radeon(\(TM\))? Graphics$|Radeon Vega|UHD Graphics|Iris|Intel\(R\) Graphics|Arc\(TM\) Graphics",
+                                                  RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Drives, USB/HID controllers, PSUs and batteries are slow to discover and not needed for the
+    // first taskbar reading, so they're enabled after it (see EnableDeferredGroups).
+    readonly Computer _computer = new()
+    {
+        IsCpuEnabled = true,
+        IsGpuEnabled = true,
+        IsMemoryEnabled = true,
+        IsMotherboardEnabled = true,
+        IsNetworkEnabled = true,
+    };
+    readonly HashSet<IHardware> _seen = new();
+    bool _deferredEnabled;
+
+    readonly Dictionary<string, Ring> _history = new();
+    readonly AutoResetEvent _wake = new(false);
+    Thread? _thread;
+    volatile bool _running;
+    volatile Snapshot? _latest;
+    bool _opened;
+
+    public Snapshot? Latest => _latest;
+    public int IntervalMs { get; set; } = 1000;
+    /// <summary>Hardware id of the GPU to treat as primary, or null to prefer the discrete card.</summary>
+    public string? PreferredGpuId { get; set; }
+    /// <summary>True while the dashboard is open: poll every device on every tick.</summary>
+    public bool DetailedMode { get; set; }
+    /// <summary>True when a visible item shows drive stats, so drives are polled more often.</summary>
+    public bool NeedStorage { get; set; }
+    /// <summary>True when the board item is on the taskbar, so the sensor chip is polled every tick.</summary>
+    public bool NeedBoard { get; set; }
+    /// <summary>True when the second-GPU item is on the taskbar, so the non-primary GPU is polled every tick.</summary>
+    public bool NeedSecondGpu { get; set; }
+    long _tick;
+    string? _primaryGpuId;
+    public event Action<Snapshot>? Updated;
+
+    // ---- NVML-free GPU power ----------------------------------------------------------------
+    // NVML commits ~20 MB the moment it initialises and never gives it back, yet the only thing the
+    // taskbar needs from it is board power. NVAPI (already loaded) reports power as a percentage of
+    // the card's power target, so with a per-card watts-per-percent ratio we can show watts without
+    // NVML. The ratio is learned from real NVML readings: by a short-lived calibration process on
+    // first run, and continuously whenever NVML is loaded (the dashboard loads it for PCIe stats).
+
+    readonly bool _lean;
+    bool _nvmlBlocked;
+    readonly NvmlFeed _nvmlFeed = new();
+    readonly Dictionary<string, (float Min, float Max)> _estimatedRange = new();
+
+    /// <summary>Watts per 1% of NVAPI's "GPU Power" reading, keyed by GPU name.</summary>
+    public Dictionary<string, float> PowerPerPercent { get; } = new();
+    /// <summary>Raised on the poller thread when a ratio was learned or refined.</summary>
+    public event Action? PowerCalibrationChanged;
+    /// <summary>True while board power is estimated (NVML not loaded).</summary>
+    public bool GpuPowerEstimated => _nvmlBlocked;
+
+    /// <param name="lean">Skip NVML until the dashboard needs it (the tray app); diagnostics load everything.</param>
+    public HardwareService(bool lean = false) => _lean = lean;
+
+    public void Start()
+    {
+        _running = true;
+        _thread = new Thread(Loop) { IsBackground = true, Name = "Sensor poller" };
+        _thread.Start();
+    }
+
+    /// <summary>Wakes the poller early, e.g. after a setting changed.</summary>
+    public void Poke() => _wake.Set();
+
+    void Loop()
+    {
+        while (_running)
+        {
+            var started = Environment.TickCount64;
+            try
+            {
+                var snap = UpdateOnce();
+                Updated?.Invoke(snap);
+            }
+            catch
+            {
+                // A misbehaving sensor driver must never take the tray app down.
+            }
+            var elapsed = (int)(Environment.TickCount64 - started);
+            _wake.WaitOne(Math.Max(50, IntervalMs - elapsed));
+        }
+    }
+
+    public Snapshot UpdateOnce()
+    {
+        if (!_opened)
+        {
+            if (_lean) _nvmlBlocked = NvmlBlocker.Block();
+            _computer.Open();
+            _opened = true;
+        }
+        else if (!_deferredEnabled)
+        {
+            EnableDeferredGroups();
+        }
+        // The dashboard shows everything, including NVML-only PCIe throughput: stream it from a
+        // helper process while the dashboard is open, so NVML's memory leaves with the helper.
+        if (_nvmlBlocked) _nvmlFeed.SetWanted(DetailedMode, _computer.Hardware.Any(h => h.HardwareType == HardwareType.GpuNvidia));
+        UpdateHardware();
+
+        var all = new List<HardwareReading>();
+        foreach (var hw in _computer.Hardware) Collect(hw, all);
+
+        // A card without NVAPI's power percentage can't be estimated: fall back to NVML for it.
+        // Checked once at startup only, so a single missed reading can't trigger it later.
+        if (_nvmlBlocked && _tick == 1 && all.Any(h => h.Type == HardwareType.GpuNvidia && h.Find(SensorType.Load, "GPU Power") == null))
+            LoadNvml("GPU reports no power percentage");
+
+        var summary = Summarize(all, PreferredGpuId);
+        _primaryGpuId = summary.Gpu?.Id;
+
+        var display = all
+            .Where(r => r.Sensors.Count > 0 && !IsIdleNetwork(r))
+            .Select(r => r.Type == HardwareType.SuperIO && summary.BoardName != null ? r with { Name = $"{summary.BoardName} · {r.Name}" } : r)
+            .OrderBy(r => Rank(r.Type))
+            .ToList();
+
+        Push("cpu", summary.CpuLoad);
+        Push("cputemp", summary.CpuTemp);
+        Push("ram", summary.RamLoad);
+        Push("power", summary.TotalPower);
+        Push("net", summary.NetDown + summary.NetUp);
+        Push("netdown", summary.NetDown);
+        Push("netup", summary.NetUp);
+        Push("cpupower", summary.CpuPower);
+        Push("chipset", summary.ChipsetTemp ?? summary.SystemTemp);
+        Push("disk", summary.Disks.Select(d => d.Temp).DefaultIfEmpty(null).Max());
+        foreach (var d in summary.Disks)
+        {
+            Push("disk:" + d.Id, d.Temp);
+            Push("diskio:" + d.Id, (d.ReadRate ?? 0) + (d.WriteRate ?? 0));
+        }
+        foreach (var g in summary.Gpus)
+        {
+            Push("gpu:" + g.Id, g.Load);
+            Push("gputemp:" + g.Id, g.Temp);
+            Push("gpupower:" + g.Id, g.Power);
+        }
+
+        // Snapshots carry the short window the taskbar/tiles draw; the dashboard asks for longer ranges.
+        Dictionary<string, float[]> history;
+        lock (_history) history = _history.ToDictionary(kv => kv.Key, kv => kv.Value.Last(HistoryLength));
+        var snap = new Snapshot(DateTime.Now, display, summary, history);
+        _latest = snap;
+        return snap;
+    }
+
+    /// <summary>
+    /// Polls each device as often as anything on screen needs it. Drive SMART queries and DIMM SPD
+    /// reads over SMBus are by far the most expensive and change slowly, so they're throttled unless
+    /// the dashboard is open.
+    /// </summary>
+    void UpdateHardware()
+    {
+        _tick++;
+        foreach (var hw in _computer.Hardware)
+        {
+            // Always read a device the first time we see it so it never shows up empty.
+            bool first = _seen.Add(hw);
+            int everyMs = hw.HardwareType switch
+            {
+                HardwareType.Storage => DetailedMode ? 0 : NeedStorage ? 5000 : 30000,
+                HardwareType.Memory when hw.Sensors.Any(s => s.SensorType == SensorType.Timing) => DetailedMode ? 5000 : 15000,
+                HardwareType.Motherboard => DetailedMode || NeedBoard ? 0 : 3000,
+                HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel
+                    when _primaryGpuId != null && hw.Identifier.ToString() != _primaryGpuId => DetailedMode || NeedSecondGpu ? 0 : 5000,
+                _ => 0,
+            };
+            if (!first && everyMs > 0)
+            {
+                int ticks = Math.Max(1, everyMs / Math.Max(1, IntervalMs));
+                if (_tick % ticks != 0) continue;
+            }
+            UpdateDevice(hw, DetailedMode);
+        }
+    }
+
+    /// <summary>Updates one device, skipping NVML's slow PCIe sampling unless the dashboard is open.</summary>
+    internal static void UpdateDevice(IHardware hw, bool detailed)
+    {
+        if (detailed) hw.Update();
+        else D3DGate.Update(hw);
+        foreach (var sub in hw.SubHardware) UpdateDevice(sub, detailed);
+    }
+
+    /// <summary>
+    /// The per-engine Direct3D counters (D3D 3D / Copy / Video…, ~20 per GPU) cost several ms per GPU
+    /// per poll and are only shown with "advanced sensors" in the dashboard; the headline GPU load
+    /// comes from NVAPI/ADL instead. Background polls hide the D3D device id so the library skips them.
+    /// </summary>
+    static class D3DGate
+    {
+        static readonly Dictionary<Type, FieldInfo?> Fields = new();
+        static readonly HashSet<Type> Broken = new();
+
+        public static void Update(IHardware hw)
+        {
+            var type = hw.GetType();
+            if (!Fields.TryGetValue(type, out var field))
+                Fields[type] = field = type.GetField("_d3dDeviceId", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (field == null || Broken.Contains(type) || field.GetValue(hw) is not string id)
+            {
+                Inner(hw);
+                return;
+            }
+            field.SetValue(hw, null);
+            try
+            {
+                Inner(hw);
+            }
+            catch
+            {
+                Broken.Add(type); // library changed shape; stop gating this type
+                field.SetValue(hw, id);
+                Inner(hw);
+                return;
+            }
+            finally
+            {
+                field.SetValue(hw, id);
+            }
+        }
+
+        static void Inner(IHardware hw)
+        {
+            if (NvmlGate.Applies(hw)) NvmlGate.UpdateWithoutPcie(hw);
+            else hw.Update();
+        }
+    }
+
+    /// <summary>
+    /// NVML's PCIe throughput query blocks for ~20 ms per direction while it samples the bus, which
+    /// made the NVIDIA card ~80% of every poll. The library makes all NVML calls behind one device
+    /// handle, so for background polls we hide that handle during Update() (skipping the sampling)
+    /// and read the one NVML value we still need, board power, ourselves. PCIe throughput keeps
+    /// updating normally whenever the dashboard is open.
+    /// </summary>
+    static class NvmlGate
+    {
+        const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
+        static readonly Type? GpuType = typeof(Computer).Assembly.GetType("LibreHardwareMonitor.Hardware.Gpu.NvidiaGpu");
+        static readonly FieldInfo? DeviceField = GpuType?.GetField("_nvmlDevice", Private);
+        static readonly FieldInfo? PowerField = GpuType?.GetField("_powerUsage", Private);
+        static readonly FieldInfo? HandleField = DeviceField == null ? null
+            : Nullable.GetUnderlyingType(DeviceField.FieldType)?.GetField("Handle", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        static readonly bool Available = DeviceField != null && PowerField != null && HandleField != null && LoadNvml();
+
+        public static bool Applies(IHardware hw) => Available && hw.GetType() == GpuType;
+
+        public static void UpdateWithoutPcie(IHardware hw)
+        {
+            var device = DeviceField!.GetValue(hw);
+            if (device == null)
+            {
+                hw.Update();
+                return;
+            }
+            DeviceField.SetValue(hw, null);
+            try
+            {
+                hw.Update();
+            }
+            finally
+            {
+                DeviceField.SetValue(hw, device);
+            }
+
+            if (HandleField!.GetValue(device) is IntPtr handle && handle != IntPtr.Zero &&
+                nvmlDeviceGetPowerUsage(handle, out uint milliwatts) == 0 &&
+                PowerField!.GetValue(hw) is ISensor sensor)
+            {
+                sensor.GetType().GetProperty("Value")?.SetValue(sensor, (float?)(milliwatts / 1000f));
+            }
+        }
+
+        static bool LoadNvml()
+        {
+            try
+            {
+                return NativeLibrary.TryLoad("nvml.dll", typeof(NvmlGate).Assembly, DllImportSearchPath.System32, out _);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        [DllImport("nvml.dll", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        static extern int nvmlDeviceGetPowerUsage(IntPtr device, out uint milliwatts);
+    }
+
+    /// <summary>Public so diagnostics can force full discovery up front.</summary>
+    public void EnableDeferredGroups()
+    {
+        _deferredEnabled = true;
+        _computer.IsStorageEnabled = true;
+        _computer.IsControllerEnabled = true;
+        _computer.IsPsuEnabled = true;
+        _computer.IsBatteryEnabled = true;
+    }
+
+    static int Rank(HardwareType type)
+    {
+        var i = Array.IndexOf(DisplayOrder, type);
+        return i < 0 ? DisplayOrder.Length : i;
+    }
+
+    void Push(string key, float? value)
+    {
+        lock (_history)
+        {
+            if (!_history.TryGetValue(key, out var ring)) _history[key] = ring = new Ring(LongHistoryLength);
+            ring.Add(value ?? float.NaN);
+        }
+    }
+
+    /// <summary>The newest <paramref name="count"/> samples of a series (oldest first), for the dashboard graphs.</summary>
+    public float[] GetHistory(string key, int count)
+    {
+        lock (_history) return _history.TryGetValue(key, out var ring) ? ring.Last(count) : Array.Empty<float>();
+    }
+
+    /// <summary>Fixed-size ring buffer: no per-sample allocation however long the history.</summary>
+    sealed class Ring
+    {
+        readonly float[] _data;
+        int _next, _count;
+
+        public Ring(int capacity) => _data = new float[capacity];
+
+        public void Add(float v)
+        {
+            _data[_next] = v;
+            _next = (_next + 1) % _data.Length;
+            if (_count < _data.Length) _count++;
+        }
+
+        public float[] Last(int n)
+        {
+            n = Math.Clamp(n, 0, _count);
+            var result = new float[n];
+            int start = (_next - n + _data.Length) % _data.Length;
+            for (int i = 0; i < n; i++) result[i] = _data[(start + i) % _data.Length];
+            return result;
+        }
+    }
+
+    void Collect(IHardware hw, List<HardwareReading> into)
+    {
+        var sensors = hw.Sensors
+            .Where(s => s.Value.HasValue)
+            .OrderBy(s => (int)s.SensorType).ThenBy(s => s.Index)
+            .Select(s => new SensorReading(s.Name, s.SensorType, Clean(s.Value), Clean(s.Min), Clean(s.Max)))
+            .ToList();
+        var reading = new HardwareReading(hw.Identifier.ToString(), hw.Name, hw.HardwareType, sensors);
+        if (hw.HardwareType == HardwareType.GpuNvidia)
+        {
+            if (_nvmlFeed.TryGet(hw.Name, out var feed))
+            {
+                // Same names LibreHardwareMonitor uses when it has NVML itself.
+                sensors.Add(new SensorReading("GPU Package", SensorType.Power, feed.Watts, null, null));
+                sensors.Add(new SensorReading("GPU PCIe Rx", SensorType.Throughput, feed.RxBytes, null, null));
+                sensors.Add(new SensorReading("GPU PCIe Tx", SensorType.Throughput, feed.TxBytes, null, null));
+            }
+            CalibrateOrEstimatePower(reading, sensors);
+        }
+        into.Add(reading);
+        foreach (var sub in hw.SubHardware) Collect(sub, into);
+    }
+
+    void CalibrateOrEstimatePower(HardwareReading gpu, List<SensorReading> sensors)
+    {
+        var pct = gpu.Value(SensorType.Load, "GPU Power");
+        if (pct is not > 0) return;
+        var real = gpu.Find(SensorType.Power, "GPU Package")?.Value;
+
+        if (real is > 0)
+        {
+            // Learn from real readings; ignore near-idle samples where rounding dominates.
+            if (pct < 3) return;
+            float sample = real.Value / pct.Value;
+            // Sanity: real cards land around 1–10 W per percent; anything else is a bad reading.
+            if (!float.IsFinite(sample) || sample < 0.2f || sample > 50f) return;
+            bool changed;
+            lock (PowerPerPercent)
+            {
+                PowerPerPercent.TryGetValue(gpu.Name, out var old);
+                float next = old <= 0 ? sample : old * 0.9f + sample * 0.1f;
+                changed = old <= 0 || Math.Abs(next - old) / old > 0.01f;
+                PowerPerPercent[gpu.Name] = next;
+            }
+            if (changed) PowerCalibrationChanged?.Invoke();
+            return;
+        }
+
+        float ratio;
+        lock (PowerPerPercent)
+            if (!PowerPerPercent.TryGetValue(gpu.Name, out ratio) || ratio <= 0) return;
+        float watts = pct.Value * ratio;
+        var range = _estimatedRange.TryGetValue(gpu.Id, out var r) ? (Math.Min(r.Min, watts), Math.Max(r.Max, watts)) : (watts, watts);
+        _estimatedRange[gpu.Id] = range;
+        sensors.Add(new SensorReading("GPU Board Power", SensorType.Power, watts, range.Item1, range.Item2));
+    }
+
+    /// <summary>Loads NVML (permanently) by re-creating the GPU devices with it available.</summary>
+    void LoadNvml(string reason)
+    {
+        if (_lean) Program.Log($"Loading NVML ({reason}); +~20 MB until restart.");
+        _nvmlBlocked = false;
+        NvmlBlocker.Unblock();
+        _computer.IsGpuEnabled = false;
+        _computer.IsGpuEnabled = true;
+    }
+
+    /// <summary>Keeps LibreHardwareMonitor from initialising NVML by marking it as already initialised.</summary>
+    static class NvmlBlocker
+    {
+        static readonly PropertyInfo? IsAvailable = typeof(Computer).Assembly
+            .GetType("LibreHardwareMonitor.Interop.NvidiaML")
+            ?.GetProperty("IsAvailable", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+
+        public static bool Block()
+        {
+            try
+            {
+                if (IsAvailable?.SetMethod == null || IsAvailable.GetValue(null) is true) return false;
+                IsAvailable.SetValue(null, true);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static void Unblock()
+        {
+            try { IsAvailable?.SetValue(null, false); }
+            catch { }
+        }
+    }
+
+    static float? Clean(float? v) => v is { } x && (float.IsNaN(x) || float.IsInfinity(x)) ? null : v;
+
+    static float? Positive(float? v) => v > 0 ? v : null;
+
+    // Windows exposes a pile of virtual/disconnected adapters; only show ones that have moved data.
+    static bool IsIdleNetwork(HardwareReading r) =>
+        r.Type == HardwareType.Network &&
+        r.Sensors.Where(s => s.Type == SensorType.Data).All(s => (s.Value ?? 0) <= 0.001f);
+
+    /// <summary>"NVIDIA GeForce RTX 5080" → "RTX 5080", "AMD Ryzen 7 9800X3D" → "Ryzen 7 9800X3D".</summary>
+    public static string ShortName(string name)
+    {
+        var s = Regex.Replace(name, @"\((TM|R|tm|r)\)", "");
+        s = Regex.Replace(s, @"^(NVIDIA GeForce|NVIDIA|AMD|Intel Core|Intel)\s+", "", RegexOptions.IgnoreCase);
+        s = Regex.Replace(s, @"\s+\d+-Core Processor$|\s+Processor$", "", RegexOptions.IgnoreCase);
+        return Regex.Replace(s, @"\s{2,}", " ").Trim();
+    }
+
+    static bool IsIntegrated(HardwareReading g) =>
+        g.Type != HardwareType.GpuNvidia &&
+        (IntegratedGpuName.IsMatch(g.Name.Trim()) || (g.Value(SensorType.SmallData, "GPU Memory Total") ?? 0) is > 0 and < 2048);
+
+    static GpuSummary SummarizeGpu(HardwareReading g) => new()
+    {
+        Id = g.Id,
+        Name = g.Name,
+        ShortName = ShortName(g.Name),
+        Integrated = IsIntegrated(g),
+        Load = g.Value(SensorType.Load, "GPU Core", "D3D 3D"),
+        Temp = Positive(g.Value(SensorType.Temperature, "GPU Core", "GPU Edge", "GPU VR SoC") ?? g.First(SensorType.Temperature)),
+        HotSpot = Positive(g.Value(SensorType.Temperature, "GPU Hot Spot")),
+        MemJunction = Positive(g.Value(SensorType.Temperature, "GPU Memory Junction")),
+        Power = g.Value(SensorType.Power, "GPU Package", "GPU Board Power", "GPU Power", "GPU Core") ??
+                (g.Type == HardwareType.GpuNvidia ? null : g.First(SensorType.Power)),
+        PowerLimitPct = g.Value(SensorType.Load, "GPU Power"),
+        CoreClock = g.Value(SensorType.Clock, "GPU Core"),
+        MemClock = g.Value(SensorType.Clock, "GPU Memory"),
+        VramUsedMb = g.Value(SensorType.SmallData, "GPU Memory Used", "D3D Dedicated Memory Used"),
+        VramTotalMb = g.Value(SensorType.SmallData, "GPU Memory Total"),
+        FanRpm = g.Value(SensorType.Fan, "GPU Fan"),
+        FanPct = g.Value(SensorType.Control, "GPU Fan"),
+    };
+
+    static Summary Summarize(IReadOnlyList<HardwareReading> all, string? preferredGpu)
+    {
+        var cpu = all.FirstOrDefault(h => h.Type == HardwareType.Cpu);
+        var memories = all.Where(h => h.Type == HardwareType.Memory).ToList();
+        var mem = memories.FirstOrDefault(h => h.Find(SensorType.Data, "Memory Used") != null &&
+                                               !h.Name.Contains("Virtual", StringComparison.OrdinalIgnoreCase));
+        var virt = memories.FirstOrDefault(h => h.Name.Contains("Virtual", StringComparison.OrdinalIgnoreCase));
+        var board = all.FirstOrDefault(h => h.Type == HardwareType.Motherboard);
+        var boardSensors = all.Where(h => h.Type is HardwareType.Motherboard or HardwareType.SuperIO or HardwareType.EmbeddedController)
+                              .SelectMany(h => h.Sensors).ToList();
+
+        float? BoardTemp(params string[] keys) => boardSensors.FirstOrDefault(s => s.Type == SensorType.Temperature && s.Value > 0 &&
+            keys.Any(k => s.Name.Contains(k, StringComparison.OrdinalIgnoreCase)))?.Value;
+
+        // CPU
+        float? cpuClock = Positive(cpu?.Value(SensorType.Clock, "Cores (Average)"));
+        if (cpu != null && cpuClock == null)
+        {
+            var cores = cpu.Sensors.Where(s => s.Type == SensorType.Clock && s.Value > 0 &&
+                                               s.Name.StartsWith("Core #", StringComparison.OrdinalIgnoreCase) &&
+                                               !s.Name.Contains("Effective")).ToList();
+            if (cores.Count > 0) cpuClock = cores.Average(s => s.Value!.Value);
+        }
+        float? cpuTemp = cpu?.Value(SensorType.Temperature, "Core (Tctl/Tdie)", "CPU Package", "Tctl", "Package", "Core Max")
+                         ?? cpu?.Sensors.Where(s => s.Type == SensorType.Temperature).Select(s => s.Value).DefaultIfEmpty(null).Max();
+
+        // GPUs
+        var gpus = all.Where(h => h.Type is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel)
+                      .Select(SummarizeGpu).ToList();
+        var primary = gpus.FirstOrDefault(g => g.Id == preferredGpu)
+                      ?? gpus.FirstOrDefault(g => !g.Integrated)
+                      ?? gpus.FirstOrDefault();
+        var second = gpus.FirstOrDefault(g => g != primary && g.Integrated) ?? gpus.FirstOrDefault(g => g != primary);
+
+        // Memory
+        float? ramUsed = mem?.Value(SensorType.Data, "Memory Used");
+        float? ramAvail = mem?.Value(SensorType.Data, "Memory Available");
+        float? virtUsed = virt?.Value(SensorType.Data, "Memory Used");
+        float? virtAvail = virt?.Value(SensorType.Data, "Memory Available");
+        float? dimmTemp = memories.SelectMany(m => m.Sensors)
+            .Where(s => s.Type == SensorType.Temperature && s.Name.StartsWith("DIMM", StringComparison.OrdinalIgnoreCase) && s.Value > 0)
+            .Select(s => s.Value).DefaultIfEmpty(null).Max();
+
+        // Network
+        var nets = all.Where(h => h.Type == HardwareType.Network && !IsIdleNetwork(h)).ToList();
+        float? down = nets.Count == 0 ? null : nets.Sum(n => n.Value(SensorType.Throughput, "Download Speed") ?? 0);
+        float? up = nets.Count == 0 ? null : nets.Sum(n => n.Value(SensorType.Throughput, "Upload Speed") ?? 0);
+        var busiest = nets.OrderByDescending(n => (n.Value(SensorType.Data, "Data Downloaded") ?? 0) + (n.Value(SensorType.Data, "Data Uploaded") ?? 0))
+                          .FirstOrDefault();
+
+        // Storage
+        var disks = all.Where(h => h.Type == HardwareType.Storage).Select(d => new DiskSummary
+        {
+            Id = d.Id,
+            Name = d.Name,
+            Temp = Positive(d.Value(SensorType.Temperature, "Composite Temperature", "Temperature") ?? d.First(SensorType.Temperature)),
+            UsedPct = d.Value(SensorType.Load, "Used Space"),
+            ReadRate = d.Value(SensorType.Throughput, "Read Rate"),
+            WriteRate = d.Value(SensorType.Throughput, "Write Rate"),
+        }).ToList();
+
+        return new Summary
+        {
+            CpuName = cpu?.Name,
+            CpuShortName = cpu == null ? null : ShortName(cpu.Name),
+            CpuLoad = cpu?.Value(SensorType.Load, "CPU Total"),
+            CpuMaxCoreLoad = cpu?.Value(SensorType.Load, "CPU Core Max"),
+            // Without ring-0 access these read as 0 rather than missing.
+            CpuTemp = Positive(cpuTemp),
+            CpuCcdTemp = Positive(cpu?.Value(SensorType.Temperature, "CCD1 (Tdie)", "CCD")),
+            CpuPower = Positive(cpu?.Value(SensorType.Power, "Package", "CPU Package") ?? cpu?.First(SensorType.Power)),
+            CpuClock = cpuClock,
+            CpuEffectiveClock = Positive(cpu?.Value(SensorType.Clock, "Cores (Average Effective)")),
+            CpuFanRpm = boardSensors.FirstOrDefault(s => s.Type == SensorType.Fan && s.Name.StartsWith("CPU", StringComparison.OrdinalIgnoreCase))?.Value,
+
+            Gpus = gpus,
+            Gpu = primary,
+            SecondGpu = second,
+
+            RamUsedGb = ramUsed,
+            RamTotalGb = ramUsed + ramAvail,
+            RamLoad = mem?.Value(SensorType.Load, "Memory"),
+            VirtualUsedGb = virtUsed,
+            VirtualTotalGb = virtUsed + virtAvail,
+            DimmTemp = dimmTemp,
+
+            BoardName = board?.Name,
+            ChipsetTemp = BoardTemp("Chipset", "PCH"),
+            VrmTemp = BoardTemp("VRM", "MOS"),
+            SystemTemp = BoardTemp("System", "Motherboard"),
+            SocketTemp = BoardTemp("CPU"),
+
+            NetDown = down,
+            NetUp = up,
+            NetAdapter = busiest?.Name,
+
+            Disks = disks,
+        };
+    }
+
+    public void Dispose()
+    {
+        _running = false;
+        _wake.Set();
+        _thread?.Join(3000);
+        _nvmlFeed.SetWanted(false, false);
+        if (_nvmlBlocked) NvmlBlocker.Unblock(); // otherwise Close() tries to shut down an NVML that never started
+        try
+        {
+            if (_opened) _computer.Close();
+        }
+        catch
+        {
+            // Exiting anyway; a driver that fails to close cleanly shouldn't surface an error.
+        }
+    }
+}
