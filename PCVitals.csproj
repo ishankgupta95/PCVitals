@@ -1,0 +1,41 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <AssemblyName>PCVitals</AssemblyName>
+    <Product>PC Vitals</Product>
+    <Version>1.0.0</Version>
+
+    <!-- Footprint: precompile to native code (no JIT at startup), skip ICU, and use a GC tuned
+         for a small, long-running background process instead of throughput. -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <TieredPGO>false</TieredPGO>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Compact aggressively and give memory back to the OS rather than keeping it for reuse. -->
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="7" />
+    <RuntimeHostConfigurationOption Include="System.GC.RetainVM" Value="false" />
+    <!-- The gen0 budget scales with L3 cache size; on big-cache CPUs (e.g. 96 MB on X3D parts) it let
+         ~40+ MB of garbage pile up between collections. A hard limit caps the budget at ~5 MB.
+         The live heap is ~3-11 MB, so 64 MB leaves ample headroom. -->
+    <RuntimeHostConfigurationOption Include="System.GC.HeapHardLimit" Value="0x4000000" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" />
+  </ItemGroup>
+
+</Project>

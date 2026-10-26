@@ -1,0 +1,19 @@
+# Build output
+bin/
+obj/
+publish/
+out/
+artifacts/
+
+# IDE / user files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.rsuser
+
+# Logs and local diagnostics
+*.log
+dump*.txt
+bench*.txt
