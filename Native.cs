@@ -198,6 +198,10 @@ static class Native
             : Rectangle.FromLTRB(wa.Left, shown.Bottom, wa.Right, wa.Bottom);
     }
 
+    /// <summary>Makes Windows redraw a window's frame (e.g. the title bar after a theme change).</summary>
+    public static void RefreshFrame(IntPtr hwnd) =>
+        SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | 0x0004 /* NOZORDER */ | 0x0020 /* FRAMECHANGED */);
+
     /// <summary>Rounded Windows 11 corners and a title bar matching the app theme.</summary>
     public static void ApplyRoundedDarkFrame(IntPtr hwnd)
     {

@@ -86,6 +86,53 @@ sealed class SettingsForm : Form
         foreach (var p in _pages.Values) ApplyScrollbarTheme(p);
     }
 
+    /// <summary>
+    /// Switches the open window to the current palette in place. Owner-drawn controls read the
+    /// theme when they paint; the few standard controls and the title bar are recoloured here.
+    /// </summary>
+    public void ApplyTheme()
+    {
+        SuspendLayout();
+        BackColor = Theme.Bg;
+        ForeColor = Theme.Text;
+        Recolor(this);
+        ResumeLayout(false);
+        if (IsHandleCreated)
+        {
+            Native.ApplyRoundedDarkFrame(Handle);
+            Native.RefreshFrame(Handle);
+            foreach (var p in _pages.Values) ApplyScrollbarTheme(p);
+        }
+        Invalidate(invalidateChildren: true);
+    }
+
+    static void Recolor(Control parent)
+    {
+        foreach (Control c in parent.Controls)
+        {
+            switch (c)
+            {
+                case NavList:
+                    c.BackColor = Theme.Rail;
+                    break;
+                case Card or AccessoryRow:
+                    c.BackColor = Theme.Surface;
+                    break;
+                case TextBox box:
+                    box.BackColor = Theme.SurfaceHover;
+                    box.ForeColor = Theme.Text;
+                    break;
+                case Label label:
+                    label.ForeColor = label.Tag as string == "dim" ? Theme.TextDim : Theme.Text;
+                    break;
+                case Panel: // pages, the item list, the theme swatch row
+                    c.BackColor = Theme.Bg;
+                    break;
+            }
+            Recolor(c);
+        }
+    }
+
     /// <summary>Refreshes previews and live values with a new sensor reading.</summary>
     public void SetSnapshot(Snapshot snap)
     {
@@ -173,6 +220,7 @@ sealed class SettingsForm : Form
         AutoSize = true,
         MaximumSize = new Size(width, 0),
         ForeColor = Theme.TextDim,
+        Tag = "dim",
         Margin = new Padding(0, 0, 0, 10),
     };
 
@@ -461,7 +509,8 @@ sealed class SettingsForm : Form
             {
                 if (_s.ColorTheme == mode) return;
                 _s.ColorTheme = mode;
-                Changed(); // the app re-applies the theme and reopens this window in the new colours
+                foreach (var (sw, m) in swatches) sw.Selected = m == mode;
+                Changed(); // the app applies the theme, which recolours this window in place
             }) { Selected = _s.ColorTheme == mode };
             swatches.Add((swatch, mode));
             row.Controls.Add(swatch);
@@ -517,7 +566,7 @@ sealed class SettingsForm : Form
         var version = typeof(SettingsForm).Assembly.GetName().Version;
         p.Controls.Add(Hint($"PC Vitals {version?.ToString(3)}\nA lightweight system monitor for the Windows taskbar."));
 
-        _usage = new Label { AutoSize = true, ForeColor = Theme.Text, BackColor = Theme.Surface, Text = SelfUsage() };
+        _usage = new Label { AutoSize = true, ForeColor = Theme.Text, Text = SelfUsage() }; // background comes from its card
         p.Controls.Add(new Card("Resource use", "What PC Vitals itself is using right now.", _usage, ""));
 
         var (pawnInstalled, pawnVersion) = HardwareService.PawnIoStatus();

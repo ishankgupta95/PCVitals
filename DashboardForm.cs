@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace PCVitals;
 
-/// <summary>Borderless flyout that opens above the tray.</summary>
+/// <summary>Borderless dashboard window that opens centred on the display it was opened from.</summary>
 sealed class DashboardForm : Form
 {
     readonly DashboardView _view;
@@ -107,7 +107,10 @@ sealed class DashboardForm : Form
     /// <summary>Switches the open dashboard to an item's page; false if it was already showing it.</summary>
     public bool SwitchTo(WidgetKind page) => _view.ShowPage(page);
 
-    /// <summary>Shows the dashboard near <paramref name="anchor"/>, on the page for <paramref name="page"/> if given.</summary>
+    /// <summary>
+    /// Shows the dashboard centred on the display containing <paramref name="anchor"/>, on the page for
+    /// <paramref name="page"/> if given.
+    /// </summary>
     public void ShowNear(Point anchor, WidgetKind? page = null)
     {
         _view.ShowPage(page);
@@ -124,24 +127,13 @@ sealed class DashboardForm : Form
     {
         var screen = Screen.FromPoint(anchor);
         var wa = Native.UsableArea(screen);
-        var full = screen.Bounds;
         float scale = MonitorDpi(anchor) / 96f;
         int margin = (int)(12 * scale);
         int w = Math.Min(wa.Width - margin * 2, (int)(920 * scale));
         int h = Math.Min(wa.Height - margin * 2, (int)(740 * scale));
 
-        int x, y;
-        if (wa.Left > full.Left || wa.Right < full.Right) // taskbar on the left or right edge
-        {
-            x = wa.Left > full.Left ? wa.Left + margin : wa.Right - w - margin;
-            y = Math.Clamp(anchor.Y - h / 2, wa.Top + margin, wa.Bottom - h - margin);
-        }
-        else
-        {
-            x = Math.Clamp(anchor.X - w / 2, wa.Left + margin, wa.Right - w - margin);
-            y = wa.Top > full.Top ? wa.Top + margin : wa.Bottom - h - margin;
-        }
-        return new Rectangle(x, y, w, h);
+        // Centred on the display the user clicked from (the area not covered by the taskbar).
+        return new Rectangle(wa.Left + (wa.Width - w) / 2, wa.Top + (wa.Height - h) / 2, w, h);
     }
 
     static uint MonitorDpi(Point p)

@@ -108,7 +108,8 @@ sealed class TaskbarWidget : Form
         var (scale, graphs, shown) = Fit(views, tb, dpiScale);
         views = views.Take(shown).ToList();
 
-        var sig = Signature(views, tb, scale) + floating + graphs;
+        // The floating bar follows the app theme, so a theme switch must redraw it.
+        var sig = Signature(views, tb, scale) + floating + graphs + (floating ? Theme.Bg.ToArgb() : 0);
         if (!force && sig == _signature && Visible)
         {
             KeepOnTop();
@@ -118,7 +119,9 @@ sealed class TaskbarWidget : Form
         _views = views;
 
         // Floating mode has no taskbar behind it, so it draws its own dark backdrop.
-        bool light = !floating && LightTaskbar;
+        // On the taskbar the strip matches the taskbar's light/dark setting; floating (taskbar hidden)
+        // it has its own backdrop and follows the app theme (light, dark or AMOLED black).
+        bool light = floating ? Theme.IsLight : LightTaskbar;
         using var bmp = RenderStrip(views, tb.Bounds.Height, scale, light, graphs, _hover, out _rects, floating);
         _pos = Place(tb, bmp.Width, dpiScale);
         if (floating)
@@ -303,11 +306,9 @@ sealed class TaskbarWidget : Form
         g2.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
         if (backdrop)
         {
+            // Floating backdrop in the app theme's colours.
             var pill = new Rectangle(0, S(4), total - 1, height - S(8) - 1);
-            Gfx.FillRounded(g2, pill, S(10), Color.FromArgb(235, 24, 26, 32));
-            using var path = Gfx.RoundedPath(pill, S(10));
-            using var pen = new Pen(Color.FromArgb(90, 255, 255, 255));
-            g2.DrawPath(pen, path);
+            Gfx.FillRounded(g2, pill, S(10), Color.FromArgb(240, Theme.Bg));
         }
 
         void Draw(string s, Font f, Color c, int x, float cy)

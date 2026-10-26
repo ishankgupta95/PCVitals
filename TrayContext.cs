@@ -508,12 +508,10 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     {
         _dash.ApplyTheme();
         foreach (ToolStripItem item in _menu.Items) ApplyDark(item);
-        // Settings uses standard controls coloured at creation; rebuild it in the new palette.
-        if (_settingsForm is { IsDisposed: false } form)
-        {
-            var page = form.CurrentPage;
-            BeginInvokeSafe(() => ReopenSettings(page));
-        }
+        if (_settingsForm is { IsDisposed: false } form) form.ApplyTheme(); // recoloured in place, no reopen
+        // The floating bar (auto-hidden taskbar) uses the app theme.
+        _widget.Redraw(force: true);
+        foreach (var extra in _extraWidgets.Values) extra.Redraw(force: true);
     }
 
     void BeginInvokeSafe(Action action)
