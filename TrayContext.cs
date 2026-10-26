@@ -101,12 +101,12 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             try { _dash.BeginInvoke(SavePowerCalibration); }
             catch (InvalidOperationException) { }
         };
-        _hw.Updated += snap =>
+        _hw.AddConsumer(new SnapshotConsumer(snap =>
         {
             if (_exiting) return;
             try { _dash.BeginInvoke(() => OnSnapshot(snap)); }
             catch (InvalidOperationException) { }
-        };
+        }));
         _hw.Start();
     }
 

@@ -3,136 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using LibreHardwareMonitor.Hardware;
 
-namespace PCVitals;
-
-public sealed record SensorReading(string Name, SensorType Type, float? Value, float? Min, float? Max);
-
-public sealed record HardwareReading(string Id, string Name, HardwareType Type, IReadOnlyList<SensorReading> Sensors)
-{
-    public SensorReading? Find(SensorType type, params string[] names)
-    {
-        foreach (var name in names)
-        {
-            var exact = Sensors.FirstOrDefault(s => s.Type == type && s.Value.HasValue &&
-                                                    s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-            if (exact != null) return exact;
-        }
-        foreach (var name in names)
-        {
-            var partial = Sensors.FirstOrDefault(s => s.Type == type && s.Value.HasValue &&
-                                                      s.Name.Contains(name, StringComparison.OrdinalIgnoreCase));
-            if (partial != null) return partial;
-        }
-        return null;
-    }
-
-    public float? Value(SensorType type, params string[] names) => Find(type, names)?.Value;
-
-    public float? First(SensorType type) => Sensors.FirstOrDefault(s => s.Type == type && s.Value.HasValue)?.Value;
-}
-
-public sealed class GpuSummary
-{
-    public required string Id { get; init; }
-    public required string Name { get; init; }
-    public required string ShortName { get; init; }
-    public bool Integrated { get; init; }
-    public float? Load { get; init; }
-    public float? Temp { get; init; }
-    public float? HotSpot { get; init; }
-    public float? MemJunction { get; init; }
-    public float? Power { get; init; }
-    public float? PowerLimitPct { get; init; }
-    public float? CoreClock { get; init; }
-    public float? MemClock { get; init; }
-    public float? VramUsedMb { get; init; }
-    public float? VramTotalMb { get; init; }
-    public float? FanRpm { get; init; }
-    public float? FanPct { get; init; }
-}
-
-public sealed class DiskSummary
-{
-    public required string Id { get; init; }
-    public required string Name { get; init; }
-    public float? Temp { get; init; }
-    public float? UsedPct { get; init; }
-    public float? ReadRate { get; init; }
-    public float? WriteRate { get; init; }
-}
-
-public sealed class BatterySummary
-{
-    public required string Name { get; init; }
-    public float? Charge { get; init; }
-    /// <summary>Watts into (+) or out of (−) the battery.</summary>
-    public float? RateW { get; init; }
-    public float? RemainingSeconds { get; init; }
-    /// <summary>Capacity lost compared with new, in percent.</summary>
-    public float? Wear { get; init; }
-    public float? DesignedWh { get; init; }
-    public float? FullWh { get; init; }
-    public float? Voltage { get; init; }
-    public bool? PluggedIn { get; init; }
-}
-
-/// <summary>The headline numbers shown in the taskbar, tray, tiles and hover cards.</summary>
-public sealed class Summary
-{
-    public string? CpuName { get; init; }
-    public string? CpuShortName { get; init; }
-    public float? CpuLoad { get; init; }
-    public float? CpuMaxCoreLoad { get; init; }
-    public float? CpuTemp { get; init; }
-    public float? CpuCcdTemp { get; init; }
-    public float? CpuPower { get; init; }
-    public float? CpuClock { get; init; }
-    public float? CpuEffectiveClock { get; init; }
-    public float? CpuFanRpm { get; init; }
-
-    public IReadOnlyList<GpuSummary> Gpus { get; init; } = Array.Empty<GpuSummary>();
-    /// <summary>The GPU shown as "GPU" everywhere: the user's choice, else the discrete card.</summary>
-    public GpuSummary? Gpu { get; init; }
-    /// <summary>The other GPU (usually the integrated one), if any.</summary>
-    public GpuSummary? SecondGpu { get; init; }
-
-    public float? RamUsedGb { get; init; }
-    public float? RamTotalGb { get; init; }
-    public float? RamLoad { get; init; }
-    public float? VirtualUsedGb { get; init; }
-    public float? VirtualTotalGb { get; init; }
-    public float? DimmTemp { get; init; }
-
-    public string? BoardName { get; init; }
-    public float? ChipsetTemp { get; init; }
-    public float? VrmTemp { get; init; }
-    public float? SystemTemp { get; init; }
-    public float? SocketTemp { get; init; }
-
-    public float? NetDown { get; init; }
-    public float? NetUp { get; init; }
-    public string? NetAdapter { get; init; }
-
-    public IReadOnlyList<DiskSummary> Disks { get; init; } = Array.Empty<DiskSummary>();
-
-    public BatterySummary? Battery { get; init; }
-
-    /// <summary>CPU package plus discrete GPU board power: the two components that dominate system draw.</summary>
-    public float? TotalPower
-    {
-        get
-        {
-            var parts = new[] { CpuPower }.Concat(Gpus.Where(g => !g.Integrated).Select(g => g.Power)).Where(p => p.HasValue).ToList();
-            return parts.Count == 0 ? null : parts.Sum(p => p!.Value);
-        }
-    }
-}
-
-public sealed record Snapshot(
-    DateTime Time,
-    IReadOnlyList<HardwareReading> Hardware,
-    Summary Summary,
-    IReadOnlyDictionary<string, float[]> History);
+namespace PCVitals.Core;
 
 /// <summary>
 /// Owns the LibreHardwareMonitor <see cref="Computer"/> and polls it on a background thread.
@@ -170,12 +41,8 @@ public sealed class HardwareService : IDisposable
     readonly HashSet<IHardware> _seen = new();
     bool _deferredEnabled;
 
-    readonly Dictionary<string, Ring> _history = new();
-    readonly Dictionary<string, Ring> _minutes = new();
-    readonly Dictionary<string, (double Sum, int Count)> _minuteAcc = new();
-    readonly DateTime[] _minuteStamps = new DateTime[MinuteHistoryLength];
-    int _minuteNext, _minuteStampCount;
-    DateTime _currentMinute;
+    readonly HistoryStore _history = new(LongHistoryLength, MinuteHistoryLength);
+    ISnapshotConsumer[] _consumers = Array.Empty<ISnapshotConsumer>();
     readonly AutoResetEvent _wake = new(false);
     Thread? _thread;
     volatile bool _running;
@@ -198,7 +65,14 @@ public sealed class HardwareService : IDisposable
     public bool NeedBattery { get; set; }
     long _tick;
     string? _primaryGpuId;
-    public event Action<Snapshot>? Updated;
+
+    public HistoryStore History => _history;
+
+    /// <summary>
+    /// Adds a consumer that receives every snapshot on the poll thread, after those added before it.
+    /// Add consumers before <see cref="Start"/>.
+    /// </summary>
+    public void AddConsumer(ISnapshotConsumer consumer) => _consumers = _consumers.Append(consumer).ToArray();
 
     // ---- NVML-free GPU power ----------------------------------------------------------------
     // NVML commits ~20 MB the moment it initialises and never gives it back, yet the only thing the
@@ -260,16 +134,23 @@ public sealed class HardwareService : IDisposable
         while (_running)
         {
             var started = Environment.TickCount64;
+            Snapshot? snap = null;
             try
             {
-                var snap = UpdateOnce();
-                Updated?.Invoke(snap);
+                snap = UpdateOnce();
             }
             catch (Exception ex)
             {
                 // A misbehaving sensor driver must never take the tray app down, but leave a trace.
                 LogOnce("poll:" + ex.GetType().Name + ex.TargetSite?.Name, "Sensor poll failed (continuing): " + ex);
             }
+            if (snap != null)
+                foreach (var consumer in _consumers)
+                {
+                    // One failing consumer must not starve the others.
+                    try { consumer.OnSnapshot(snap); }
+                    catch (Exception ex) { LogOnce("consumer:" + consumer.GetType().Name + ex.GetType().Name, $"{consumer.GetType().Name} failed (continuing): {ex}"); }
+                }
             var elapsed = (int)(Environment.TickCount64 - started);
             _wake.WaitOne(Math.Max(50, IntervalMs - elapsed));
         }
@@ -327,7 +208,8 @@ public sealed class HardwareService : IDisposable
             .ToList();
 
         // Close out the previous minute before this sample starts accumulating into the new one.
-        RollMinute(DateTime.Now);
+        _history.RollMinute(DateTime.Now);
+        void Push(string alias, float? value) => _history.Push(alias, value, summary.Sources.GetValueOrDefault(alias));
         Push("cpu", summary.CpuLoad);
         Push("cputemp", summary.CpuTemp);
         Push("ram", summary.RamLoad);
@@ -356,9 +238,7 @@ public sealed class HardwareService : IDisposable
         }
 
         // Snapshots carry the short window the taskbar/tiles draw; the dashboard asks for longer ranges.
-        Dictionary<string, float[]> history;
-        lock (_history) history = _history.ToDictionary(kv => kv.Key, kv => kv.Value.Last(HistoryLength));
-        var snap = new Snapshot(DateTime.Now, display, summary, history);
+        var snap = new Snapshot(DateTime.Now, display, summary, _history.Recent(HistoryLength), all);
         _latest = snap;
         return snap;
     }
@@ -530,63 +410,11 @@ public sealed class HardwareService : IDisposable
         return i < 0 ? DisplayOrder.Length : i;
     }
 
-    void Push(string key, float? value)
-    {
-        lock (_history)
-        {
-            if (!_history.TryGetValue(key, out var ring)) _history[key] = ring = new Ring(LongHistoryLength);
-            ring.Add(value ?? float.NaN);
-            if (value is { } v && float.IsFinite(v))
-            {
-                var acc = _minuteAcc.GetValueOrDefault(key);
-                _minuteAcc[key] = (acc.Sum + v, acc.Count + 1);
-            }
-            else
-            {
-                _minuteAcc.TryAdd(key, (0, 0));
-            }
-        }
-    }
-
-    /// <summary>
-    /// Folds the samples of the minute that just ended into the long-term tier: one average per
-    /// series per minute, 24 hours deep.
-    /// </summary>
-    void RollMinute(DateTime now)
-    {
-        var minute = new DateTime(now.Year, now.Month, now.Day, now.Hour, now.Minute, 0, now.Kind);
-        if (_currentMinute == default)
-        {
-            _currentMinute = minute;
-            return;
-        }
-        if (minute == _currentMinute) return;
-        lock (_history)
-        {
-            foreach (var (key, acc) in _minuteAcc)
-            {
-                if (!_minutes.TryGetValue(key, out var ring)) _minutes[key] = ring = new Ring(MinuteHistoryLength);
-                ring.Add(acc.Count > 0 ? (float)(acc.Sum / acc.Count) : float.NaN);
-            }
-            _minuteAcc.Clear();
-            _minuteStamps[_minuteNext] = _currentMinute;
-            _minuteNext = (_minuteNext + 1) % MinuteHistoryLength;
-            _minuteStampCount = Math.Min(_minuteStampCount + 1, MinuteHistoryLength);
-        }
-        _currentMinute = minute;
-    }
-
     /// <summary>The newest <paramref name="count"/> samples of a series (oldest first), for the dashboard graphs.</summary>
-    public float[] GetHistory(string key, int count)
-    {
-        lock (_history) return _history.TryGetValue(key, out var ring) ? ring.Last(count) : Array.Empty<float>();
-    }
+    public float[] GetHistory(string key, int count) => _history.Get(key, count);
 
     /// <summary>The newest <paramref name="count"/> one-minute averages of a series (oldest first).</summary>
-    public float[] GetMinuteHistory(string key, int count)
-    {
-        lock (_history) return _minutes.TryGetValue(key, out var ring) ? ring.Last(count) : Array.Empty<float>();
-    }
+    public float[] GetMinuteHistory(string key, int count) => _history.GetMinutes(key, count);
 
     /// <summary>
     /// Writes the one-minute averages (up to 24 hours) as CSV: a timestamp column, then one column
@@ -610,16 +438,9 @@ public sealed class HardwareService : IDisposable
         foreach (var d in s?.Disks ?? Array.Empty<DiskSummary>())
             columns.Add(("disk:" + d.Id, $"{d.Name} temperature (°C)"));
 
-        DateTime[] stamps;
-        var data = new List<(string Title, float[] Values)>();
-        lock (_history)
-        {
-            stamps = new DateTime[_minuteStampCount];
-            int start = (_minuteNext - _minuteStampCount + MinuteHistoryLength) % MinuteHistoryLength;
-            for (int i = 0; i < stamps.Length; i++) stamps[i] = _minuteStamps[(start + i) % MinuteHistoryLength];
-            foreach (var (key, title) in columns)
-                if (_minutes.TryGetValue(key, out var ring)) data.Add((title, ring.Last(stamps.Length)));
-        }
+        var (stamps, series) = _history.MinuteTable(columns.Select(c => c.Key));
+        var titles = columns.ToDictionary(c => c.Key, c => c.Title);
+        var data = series.Select(x => (Title: titles[x.Key], x.Values)).ToList();
 
         static string Quote(string v) => v.Contains(',') || v.Contains('"') ? "\"" + v.Replace("\"", "\"\"") + "\"" : v;
         var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -639,37 +460,16 @@ public sealed class HardwareService : IDisposable
         return stamps.Length;
     }
 
-    /// <summary>Fixed-size ring buffer: no per-sample allocation however long the history.</summary>
-    internal sealed class Ring
-    {
-        readonly float[] _data;
-        int _next, _count;
-
-        public Ring(int capacity) => _data = new float[capacity];
-
-        public void Add(float v)
-        {
-            _data[_next] = v;
-            _next = (_next + 1) % _data.Length;
-            if (_count < _data.Length) _count++;
-        }
-
-        public float[] Last(int n)
-        {
-            n = Math.Clamp(n, 0, _count);
-            var result = new float[n];
-            int start = (_next - n + _data.Length) % _data.Length;
-            for (int i = 0; i < n; i++) result[i] = _data[(start + i) % _data.Length];
-            return result;
-        }
-    }
+    // Identifier.ToString() builds a new string each call; sensors keep their identifier for life.
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ISensor, string> SensorIds = new();
+    static string IdOf(ISensor s) => SensorIds.GetValue(s, x => x.Identifier.ToString());
 
     void Collect(IHardware hw, List<HardwareReading> into)
     {
         var sensors = hw.Sensors
             .Where(s => s.Value.HasValue)
             .OrderBy(s => (int)s.SensorType).ThenBy(s => s.Index)
-            .Select(s => new SensorReading(s.Name, s.SensorType, Clean(s.Value), Clean(s.Min), Clean(s.Max)))
+            .Select(s => new SensorReading(IdOf(s), s.Name, s.SensorType, Clean(s.Value), Clean(s.Min), Clean(s.Max)))
             .ToList();
         var reading = new HardwareReading(hw.Identifier.ToString(), hw.Name, hw.HardwareType, sensors);
         if (hw.HardwareType == HardwareType.GpuNvidia)
@@ -677,9 +477,9 @@ public sealed class HardwareService : IDisposable
             if (_nvmlFeed.TryGet(hw.Name, out var feed))
             {
                 // Same names LibreHardwareMonitor uses when it has NVML itself.
-                sensors.Add(new SensorReading("GPU Package", SensorType.Power, feed.Watts, null, null));
-                sensors.Add(new SensorReading("GPU PCIe Rx", SensorType.Throughput, feed.RxBytes, null, null));
-                sensors.Add(new SensorReading("GPU PCIe Tx", SensorType.Throughput, feed.TxBytes, null, null));
+                sensors.Add(new SensorReading(SyntheticIds.For(reading.Id, "power/package"), "GPU Package", SensorType.Power, feed.Watts, null, null));
+                sensors.Add(new SensorReading(SyntheticIds.For(reading.Id, "throughput/pcie-rx"), "GPU PCIe Rx", SensorType.Throughput, feed.RxBytes, null, null));
+                sensors.Add(new SensorReading(SyntheticIds.For(reading.Id, "throughput/pcie-tx"), "GPU PCIe Tx", SensorType.Throughput, feed.TxBytes, null, null));
             }
             CalibrateOrEstimatePower(reading, sensors);
         }
@@ -718,7 +518,7 @@ public sealed class HardwareService : IDisposable
         float watts = pct.Value * ratio;
         var range = _estimatedRange.TryGetValue(gpu.Id, out var r) ? (Math.Min(r.Min, watts), Math.Max(r.Max, watts)) : (watts, watts);
         _estimatedRange[gpu.Id] = range;
-        sensors.Add(new SensorReading("GPU Board Power", SensorType.Power, watts, range.Item1, range.Item2));
+        sensors.Add(new SensorReading(SyntheticIds.For(gpu.Id, "power/board"), "GPU Board Power", SensorType.Power, watts, range.Item1, range.Item2));
     }
 
     /// <summary>Loads NVML (permanently) by re-creating the GPU devices with it available.</summary>
@@ -763,7 +563,7 @@ public sealed class HardwareService : IDisposable
 
     static float? Positive(float? v) => v > 0 ? v : null;
 
-    static BatterySummary? SummarizeBattery(HardwareReading? b)
+    static BatterySummary? SummarizeBattery(HardwareReading? b, Dictionary<string, string> sources)
     {
         if (b == null) return null;
         // LibreHardwareMonitor reports whichever of these the battery driver supports.
@@ -776,7 +576,7 @@ public sealed class HardwareService : IDisposable
         return new BatterySummary
         {
             Name = b.Name,
-            Charge = b.Value(SensorType.Level, "Charge Level"),
+            Charge = Track(sources, "battery", b.Find(SensorType.Level, "Charge Level")),
             RateW = rate,
             RemainingSeconds = Positive(b.Value(SensorType.TimeSpan, "Remaining Time")),
             Wear = b.Value(SensorType.Level, "Degradation Level"),
@@ -806,18 +606,26 @@ public sealed class HardwareService : IDisposable
         g.Type != HardwareType.GpuNvidia &&
         (IntegratedGpuName.IsMatch(g.Name.Trim()) || (g.Value(SensorType.SmallData, "GPU Memory Total") ?? 0) is > 0 and < 2048);
 
-    static GpuSummary SummarizeGpu(HardwareReading g) => new()
+    /// <summary>The sensor's value, noting it as the source of history series <paramref name="alias"/>.</summary>
+    static float? Track(Dictionary<string, string> sources, string alias, SensorReading? sensor)
+    {
+        if (sensor == null) return null;
+        sources[alias] = sensor.Id;
+        return sensor.Value;
+    }
+
+    static GpuSummary SummarizeGpu(HardwareReading g, Dictionary<string, string> sources) => new()
     {
         Id = g.Id,
         Name = g.Name,
         ShortName = ShortName(g.Name),
         Integrated = IsIntegrated(g),
-        Load = g.Value(SensorType.Load, "GPU Core", "D3D 3D"),
-        Temp = Positive(g.Value(SensorType.Temperature, "GPU Core", "GPU Edge", "GPU VR SoC") ?? g.First(SensorType.Temperature)),
+        Load = Track(sources, "gpu:" + g.Id, g.Find(SensorType.Load, "GPU Core", "D3D 3D")),
+        Temp = Positive(Track(sources, "gputemp:" + g.Id, g.Find(SensorType.Temperature, "GPU Core", "GPU Edge", "GPU VR SoC") ?? g.FirstSensor(SensorType.Temperature))),
         HotSpot = Positive(g.Value(SensorType.Temperature, "GPU Hot Spot")),
         MemJunction = Positive(g.Value(SensorType.Temperature, "GPU Memory Junction")),
-        Power = g.Value(SensorType.Power, "GPU Package", "GPU Board Power", "GPU Power", "GPU Core") ??
-                (g.Type == HardwareType.GpuNvidia ? null : g.First(SensorType.Power)),
+        Power = Track(sources, "gpupower:" + g.Id, g.Find(SensorType.Power, "GPU Package", "GPU Board Power", "GPU Power", "GPU Core") ??
+                (g.Type == HardwareType.GpuNvidia ? null : g.FirstSensor(SensorType.Power))),
         PowerLimitPct = g.Value(SensorType.Load, "GPU Power"),
         CoreClock = g.Value(SensorType.Clock, "GPU Core"),
         MemClock = g.Value(SensorType.Clock, "GPU Memory"),
@@ -838,8 +646,9 @@ public sealed class HardwareService : IDisposable
         var boardSensors = all.Where(h => h.Type is HardwareType.Motherboard or HardwareType.SuperIO or HardwareType.EmbeddedController)
                               .SelectMany(h => h.Sensors).ToList();
 
-        float? BoardTemp(params string[] keys) => boardSensors.FirstOrDefault(s => s.Type == SensorType.Temperature && s.Value > 0 &&
-            keys.Any(k => s.Name.Contains(k, StringComparison.OrdinalIgnoreCase)))?.Value;
+        var sources = new Dictionary<string, string>();
+        SensorReading? BoardTemp(params string[] keys) => boardSensors.FirstOrDefault(s => s.Type == SensorType.Temperature && s.Value > 0 &&
+            keys.Any(k => s.Name.Contains(k, StringComparison.OrdinalIgnoreCase)));
 
         // CPU
         float? cpuClock = Positive(cpu?.Value(SensorType.Clock, "Cores (Average)"));
@@ -850,12 +659,12 @@ public sealed class HardwareService : IDisposable
                                                !s.Name.Contains("Effective")).ToList();
             if (cores.Count > 0) cpuClock = cores.Average(s => s.Value!.Value);
         }
-        float? cpuTemp = cpu?.Value(SensorType.Temperature, "Core (Tctl/Tdie)", "CPU Package", "Tctl", "Package", "Core Max")
+        float? cpuTemp = Track(sources, "cputemp", cpu?.Find(SensorType.Temperature, "Core (Tctl/Tdie)", "CPU Package", "Tctl", "Package", "Core Max"))
                          ?? cpu?.Sensors.Where(s => s.Type == SensorType.Temperature).Select(s => s.Value).DefaultIfEmpty(null).Max();
 
         // GPUs
         var gpus = all.Where(h => h.Type is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel)
-                      .Select(SummarizeGpu).ToList();
+                      .Select(g => SummarizeGpu(g, sources)).ToList();
         var primary = gpus.FirstOrDefault(g => g.Id == preferredGpu)
                       ?? gpus.FirstOrDefault(g => !g.Integrated)
                       ?? gpus.FirstOrDefault();
@@ -877,14 +686,18 @@ public sealed class HardwareService : IDisposable
         var busiest = nets.OrderByDescending(n => (n.Value(SensorType.Data, "Data Downloaded") ?? 0) + (n.Value(SensorType.Data, "Data Uploaded") ?? 0))
                           .FirstOrDefault();
 
+        // Board
+        var chipset = BoardTemp("Chipset", "PCH");
+        var system = BoardTemp("System", "Motherboard");
+
         // Storage
-        var battery = SummarizeBattery(all.FirstOrDefault(h => h.Type == HardwareType.Battery));
+        var battery = SummarizeBattery(all.FirstOrDefault(h => h.Type == HardwareType.Battery), sources);
 
         var disks = all.Where(h => h.Type == HardwareType.Storage).Select(d => new DiskSummary
         {
             Id = d.Id,
             Name = d.Name,
-            Temp = Positive(d.Value(SensorType.Temperature, "Composite Temperature", "Temperature") ?? d.First(SensorType.Temperature)),
+            Temp = Positive(Track(sources, "disk:" + d.Id, d.Find(SensorType.Temperature, "Composite Temperature", "Temperature") ?? d.FirstSensor(SensorType.Temperature))),
             UsedPct = d.Value(SensorType.Load, "Used Space"),
             ReadRate = d.Value(SensorType.Throughput, "Read Rate"),
             WriteRate = d.Value(SensorType.Throughput, "Write Rate"),
@@ -894,12 +707,12 @@ public sealed class HardwareService : IDisposable
         {
             CpuName = cpu?.Name,
             CpuShortName = cpu == null ? null : ShortName(cpu.Name),
-            CpuLoad = cpu?.Value(SensorType.Load, "CPU Total"),
+            CpuLoad = Track(sources, "cpu", cpu?.Find(SensorType.Load, "CPU Total")),
             CpuMaxCoreLoad = cpu?.Value(SensorType.Load, "CPU Core Max"),
             // Without ring-0 access these read as 0 rather than missing.
             CpuTemp = Positive(cpuTemp),
             CpuCcdTemp = Positive(cpu?.Value(SensorType.Temperature, "CCD1 (Tdie)", "CCD")),
-            CpuPower = Positive(cpu?.Value(SensorType.Power, "Package", "CPU Package") ?? cpu?.First(SensorType.Power)),
+            CpuPower = Positive(Track(sources, "cpupower", cpu?.Find(SensorType.Power, "Package", "CPU Package") ?? cpu?.FirstSensor(SensorType.Power))),
             CpuClock = cpuClock,
             CpuEffectiveClock = Positive(cpu?.Value(SensorType.Clock, "Cores (Average Effective)")),
             CpuFanRpm = boardSensors.FirstOrDefault(s => s.Type == SensorType.Fan && s.Name.StartsWith("CPU", StringComparison.OrdinalIgnoreCase))?.Value,
@@ -910,16 +723,17 @@ public sealed class HardwareService : IDisposable
 
             RamUsedGb = ramUsed,
             RamTotalGb = ramUsed + ramAvail,
-            RamLoad = mem?.Value(SensorType.Load, "Memory"),
+            RamLoad = Track(sources, "ram", mem?.Find(SensorType.Load, "Memory")),
             VirtualUsedGb = virtUsed,
             VirtualTotalGb = virtUsed + virtAvail,
             DimmTemp = dimmTemp,
 
             BoardName = board?.Name,
-            ChipsetTemp = BoardTemp("Chipset", "PCH"),
-            VrmTemp = BoardTemp("VRM", "MOS"),
-            SystemTemp = BoardTemp("System", "Motherboard"),
-            SocketTemp = BoardTemp("CPU"),
+            // The "chipset" series falls back to the system temperature (see UpdateOnce).
+            ChipsetTemp = Track(sources, "chipset", chipset),
+            VrmTemp = BoardTemp("VRM", "MOS")?.Value,
+            SystemTemp = chipset == null ? Track(sources, "chipset", system) : system?.Value,
+            SocketTemp = BoardTemp("CPU")?.Value,
 
             NetDown = down,
             NetUp = up,
@@ -927,6 +741,7 @@ public sealed class HardwareService : IDisposable
 
             Disks = disks,
             Battery = battery,
+            Sources = sources,
         };
     }
 

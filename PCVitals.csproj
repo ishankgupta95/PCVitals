@@ -29,6 +29,7 @@
     <Compile Remove="tests/**" />
     <None Remove="tests/**" />
     <InternalsVisibleTo Include="PCVitals.Tests" />
+    <Using Include="PCVitals.Core" />
   </ItemGroup>
 
   <ItemGroup>

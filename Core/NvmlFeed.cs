@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 
-namespace PCVitals;
+namespace PCVitals.Core;
 
 /// <summary>
 /// Streams NVML readings (PCIe throughput, exact board power) from a helper process while the

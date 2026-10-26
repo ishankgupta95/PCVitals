@@ -20,7 +20,7 @@ public class HardwareTests
 
     static HardwareReading Gpu(HardwareType type, string name, float? vramMb = null) => new(
         "/gpu/0", name, type,
-        vramMb is { } v ? new[] { new SensorReading("GPU Memory Total", SensorType.SmallData, v, v, v) } : Array.Empty<SensorReading>());
+        vramMb is { } v ? new[] { new SensorReading("/gpu/0/smalldata/0", "GPU Memory Total", SensorType.SmallData, v, v, v) } : Array.Empty<SensorReading>());
 
     [Fact]
     public void Nvidia_cards_are_discrete() => Assert.False(HardwareService.IsIntegrated(Gpu(HardwareType.GpuNvidia, "NVIDIA GeForce RTX 5080", 16303)));
@@ -40,11 +40,11 @@ public class HardwareTests
     [Fact]
     public void Ring_returns_newest_samples_oldest_first_across_wrap()
     {
-        var ring = new HardwareService.Ring(4);
+        var ring = new HistoryStore.Ring(4);
         foreach (var v in new[] { 1f, 2, 3, 4, 5, 6 }) ring.Add(v);
         Assert.Equal(new[] { 3f, 4, 5, 6 }, ring.Last(10));
         Assert.Equal(new[] { 5f, 6 }, ring.Last(2));
-        Assert.Empty(new HardwareService.Ring(3).Last(5));
+        Assert.Empty(new HistoryStore.Ring(3).Last(5));
     }
 
     [Theory]

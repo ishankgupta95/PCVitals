@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\PCVitals.csproj" />
+    <Using Include="PCVitals.Core" />
   </ItemGroup>
 
 </Project>

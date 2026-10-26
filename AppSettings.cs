@@ -51,9 +51,18 @@ public sealed class WidgetItem
     public string Label { get; set; } = "";
 }
 
+/// <summary>The user's preferences for one sensor (see <see cref="AppSettings.Sensors"/>).</summary>
+public sealed class SensorPref
+{
+    /// <summary>Shown instead of the sensor's own name; null keeps the original.</summary>
+    public string? DisplayName { get; set; }
+    public bool Favorite { get; set; }
+    public bool Hidden { get; set; }
+}
+
 public sealed class AppSettings
 {
-    const int CurrentVersion = 2;
+    internal const int CurrentVersion = 3;
     static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PCVitals");
     static readonly string FilePath = Path.Combine(Dir, "settings.json");
     static readonly JsonSerializerOptions Json = new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
@@ -103,6 +112,8 @@ public sealed class AppSettings
     /// <summary>Learned watts per 1% of NVAPI power, per NVIDIA GPU name (see HardwareService).</summary>
     public Dictionary<string, float> GpuPowerPerPercent { get; set; } = new();
     public HashSet<string> Collapsed { get; set; } = new();
+    /// <summary>Per-sensor preferences by sensor id (e.g. "/amdcpu/0/temperature/2").</summary>
+    public Dictionary<string, SensorPref> Sensors { get; set; } = new();
 
     public static List<WidgetItem> DefaultWidgetItems() => new()
     {
@@ -136,12 +147,19 @@ public sealed class AppSettings
             settings = new AppSettings { Version = CurrentVersion };
         }
 
-        if (settings.Version < CurrentVersion)
+        if (settings.Version < 2)
         {
             // Settings from early builds only had tray number icons; start them on the taskbar layout.
             settings = new AppSettings { Version = CurrentVersion, IntervalMs = settings.IntervalMs, Collapsed = settings.Collapsed };
             settings.SaveTo(path);
         }
+        else if (settings.Version < CurrentVersion)
+        {
+            // v3 only added per-sensor preferences; everything else carries over as is.
+            settings.Version = CurrentVersion;
+            settings.SaveTo(path);
+        }
+        settings.Sensors ??= new();
 
         // Keep the item list complete if new kinds were added in an update.
         foreach (var def in DefaultWidgetItems())

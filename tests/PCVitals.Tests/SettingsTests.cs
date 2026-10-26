@@ -41,7 +41,7 @@ public sealed class SettingsTests : IDisposable
         Assert.True(s.WidgetEnabled);
         Assert.Equal(2000, s.IntervalMs);
         Assert.Contains("/amdcpu/0", s.Collapsed);
-        Assert.Contains("\"Version\": 2", File.ReadAllText(FilePath)); // migration is saved
+        Assert.Contains($"\"Version\": {AppSettings.CurrentVersion}", File.ReadAllText(FilePath)); // migration is saved
     }
 
     [Fact]
@@ -58,6 +58,46 @@ public sealed class SettingsTests : IDisposable
         Assert.Single(s.WidgetItems, i => i.Kind == WidgetKind.Memory);
         Assert.Equal(Enum.GetValues<WidgetKind>().Length, s.WidgetItems.Count);
         Assert.False(s.WidgetItems.Single(i => i.Kind == WidgetKind.Battery).Enabled); // new kinds start off
+    }
+
+    [Fact]
+    public void Version_2_settings_migrate_to_3_keeping_everything()
+    {
+        File.WriteAllText(FilePath, """
+            { "Version": 2, "IntervalMs": 2000, "ColorTheme": "Dark", "AlertCpuEnabled": true, "AlertCpuTemp": 80,
+              "WidgetItems": [ { "Kind": "Gpu", "Enabled": true, "Label": "VGA" } ] }
+            """);
+        var s = AppSettings.LoadFrom(FilePath);
+        Assert.Equal(3, s.Version);
+        Assert.Equal(2000, s.IntervalMs);
+        Assert.Equal(ThemeMode.Dark, s.ColorTheme);
+        Assert.True(s.AlertCpuEnabled);
+        Assert.Equal(80, s.AlertCpuTemp);
+        Assert.Equal("VGA", s.WidgetItems[0].Label);
+        Assert.Empty(s.Sensors);
+        Assert.Contains("\"Version\": 3", File.ReadAllText(FilePath));
+    }
+
+    [Fact]
+    public void Null_sensor_preferences_become_empty()
+    {
+        File.WriteAllText(FilePath, """{ "Version": 3, "Sensors": null }""");
+        Assert.NotNull(AppSettings.LoadFrom(FilePath).Sensors);
+    }
+
+    [Fact]
+    public void Sensor_preferences_round_trip()
+    {
+        var s = AppSettings.CreateDefault();
+        s.Sensors["/amdcpu/0/temperature/2"] = new SensorPref { DisplayName = "CCD", Favorite = true };
+        s.Sensors["/nvme/1/temperature/0"] = new SensorPref { Hidden = true };
+        s.SaveTo(FilePath);
+
+        var back = AppSettings.LoadFrom(FilePath);
+        Assert.Equal("CCD", back.Sensors["/amdcpu/0/temperature/2"].DisplayName);
+        Assert.True(back.Sensors["/amdcpu/0/temperature/2"].Favorite);
+        Assert.True(back.Sensors["/nvme/1/temperature/0"].Hidden);
+        Assert.Null(back.Sensors["/nvme/1/temperature/0"].DisplayName);
     }
 
     [Fact]
