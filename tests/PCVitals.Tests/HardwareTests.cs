@@ -37,6 +37,67 @@ public class HardwareTests
     [Fact]
     public void Small_dedicated_memory_means_integrated() => Assert.True(HardwareService.IsIntegrated(Gpu(HardwareType.GpuAmd, "Unknown GPU", 512)));
 
+    // Newer iGPUs reserve gigabytes of RAM, so only their names give them away.
+    [Theory]
+    [InlineData(HardwareType.GpuAmd, "AMD Radeon 780M Graphics")]
+    [InlineData(HardwareType.GpuAmd, "AMD Radeon(TM) 890M Graphics")]
+    [InlineData(HardwareType.GpuAmd, "AMD Radeon 760M")]
+    [InlineData(HardwareType.GpuAmd, "AMD Radeon 8060S Graphics")]
+    [InlineData(HardwareType.GpuIntel, "Intel(R) Arc(TM) 140V GPU (16GB)")]
+    [InlineData(HardwareType.GpuIntel, "Intel(R) Arc(TM) 130V GPU (8GB)")]
+    [InlineData(HardwareType.GpuIntel, "Intel(R) Arc(TM) 140T GPU (16GB)")]
+    public void New_integrated_gpus_with_lots_of_reserved_memory(HardwareType type, string name) =>
+        Assert.True(HardwareService.IsIntegrated(Gpu(type, name, 8192)));
+
+    [Theory]
+    [InlineData(HardwareType.GpuAmd, "AMD Radeon RX 7600M XT")]
+    [InlineData(HardwareType.GpuAmd, "AMD Radeon RX 9070 XT")]
+    [InlineData(HardwareType.GpuIntel, "Intel(R) Arc(TM) A770 Graphics")]
+    [InlineData(HardwareType.GpuIntel, "Intel(R) Arc(TM) B580 Graphics")]
+    public void Cards_with_similar_names_stay_discrete(HardwareType type, string name) =>
+        Assert.False(HardwareService.IsIntegrated(Gpu(type, name, 8192)));
+
+    [Fact]
+    public void Windows_answer_wins_over_the_name_and_memory_rules()
+    {
+        Assert.True(HardwareService.IsIntegrated(Gpu(HardwareType.GpuAmd, "Unknown GPU", 16384), windowsIntegrated: true));
+        Assert.False(HardwareService.IsIntegrated(Gpu(HardwareType.GpuAmd, "AMD Radeon(TM) Graphics", 512), windowsIntegrated: false));
+        Assert.True(HardwareService.IsIntegrated(Gpu(HardwareType.GpuNvidia, "NVIDIA N1X", 16384), windowsIntegrated: true));
+    }
+
+    static readonly GpuAdapters.Adapter[] Adapters =
+    {
+        new(0x1002, 0x15BF, 0x0B2B1028, true),    // Radeon 780M
+        new(0x10DE, 0x2860, 0x0B2B1028, false),   // RTX 4070 Laptop
+        new(0x8086, 0x56A0, 0x10201849, false),   // Arc A770, two different boards
+        new(0x8086, 0x56A0, 0x60051ED8, false),
+    };
+
+    [Theory]
+    [InlineData(@"\\?\PCI#VEN_1002&DEV_15BF&SUBSYS_0B2B1028&REV_C1#4&2c6a3a52&0&0041#{1ca05180-a699-450a-9a0c-de4fbe3ddd89}", true)]
+    [InlineData(@"\\?\pci#ven_10de&dev_2860&subsys_0b2b1028&rev_a1#4&1&0008#{1ca05180-a699-450a-9a0c-de4fbe3ddd89}", false)]
+    [InlineData(@"PCI\VEN_10DE&DEV_2860&SUBSYS_0B2B1028&REV_A1\FF03A962CF2DB04800", false)] // NVIDIA's form
+    [InlineData(@"\\?\PCI#VEN_8086&DEV_56A0&SUBSYS_99999999&REV_08#5&1&0", false)] // unknown board: vendor + device agree
+    [InlineData(@"\\?\PCI#VEN_1002&DEV_744C&SUBSYS_0E3A1002&REV_C8#6&1&0", null)] // not in the list
+    [InlineData(@"\\?\ROOT#BasicRender#0000", null)]
+    [InlineData(null, null)]
+    public void Matches_windows_adapters_by_pci_ids(string? path, bool? expected) =>
+        Assert.Equal(expected, GpuAdapters.IsIntegrated(path, Adapters));
+
+    [Fact]
+    public void Without_a_device_path_the_vendors_adapters_must_agree()
+    {
+        Assert.False(GpuAdapters.IsIntegrated(null, Adapters, GpuAdapters.VendorOf(HardwareType.GpuNvidia)));
+        Assert.True(GpuAdapters.IsIntegrated(null, Adapters, GpuAdapters.VendorOf(HardwareType.GpuAmd)));
+        var mixed = new GpuAdapters.Adapter[] { new(0x8086, 0x7D55, 0, true), new(0x8086, 0xE20B, 0, false) }; // Arc iGPU + B580
+        Assert.Null(GpuAdapters.IsIntegrated(null, mixed, GpuAdapters.VendorOf(HardwareType.GpuIntel)));
+    }
+
+    [Fact]
+    public void Disagreeing_adapters_give_no_answer() =>
+        Assert.Null(GpuAdapters.IsIntegrated(@"\\?\PCI#VEN_1002&DEV_1234#1",
+            new GpuAdapters.Adapter[] { new(0x1002, 0x1234, 1, true), new(0x1002, 0x1234, 2, false) }));
+
     [Fact]
     public void Ring_returns_newest_samples_oldest_first_across_wrap()
     {

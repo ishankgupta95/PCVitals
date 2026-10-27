@@ -25,7 +25,8 @@ public sealed class HardwareService : IDisposable
         HardwareType.Battery, HardwareType.PowerMonitor,
     };
 
-    static readonly Regex IntegratedGpuName = new(@"Radeon(\(TM\))? Graphics$|Radeon Vega|UHD Graphics|Iris|Intel\(R\) Graphics|Arc\(TM\) Graphics",
+    // "Radeon 780M / 890M / 8060S Graphics" and "Arc 140V / 140T" are integrated; "Radeon RX 7600M" and "Arc A770" are cards.
+    static readonly Regex IntegratedGpuName = new(@"Radeon(\(TM\))? Graphics$|Radeon Vega|Radeon(\(TM\))? \d{3,4}[MS]\b|UHD Graphics|Iris|Intel\(R\) Graphics|Arc\(TM\) (Graphics|\d{3}[VT]\b)",
                                                   RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     // Drives, USB/HID controllers, PSUs and batteries are slow to discover and not needed for the
@@ -300,7 +301,7 @@ public sealed class HardwareService : IDisposable
             LoadNvml("GPU reports no power percentage");
 
         var latency = Latency;
-        var summary = Summarize(all, PreferredGpuId, _drives, _wifi.FirstOrDefault(), latency?.Stats, latency?.Target);
+        var summary = Summarize(all, PreferredGpuId, _drives, _windowsIntegrated, _wifi.FirstOrDefault(), latency?.Stats, latency?.Target);
         _primaryGpuId = summary.Gpu?.Id;
 
         var display = all
@@ -389,6 +390,22 @@ public sealed class HardwareService : IDisposable
 
     /// <summary>Volumes and health per drive id, refreshed whenever the drive itself is read (poll thread only).</summary>
     readonly Dictionary<string, DriveDetails> _drives = new();
+
+    /// <summary>Whether Windows calls each GPU integrated (null: it doesn't say), asked once per GPU (poll thread only).</summary>
+    readonly Dictionary<string, bool?> _windowsIntegrated = new();
+
+    void AskWindowsIfIntegrated(IHardware hw, string id)
+    {
+        if (_windowsIntegrated.ContainsKey(id)) return;
+        string? path = null;
+        try { path = (hw as LibreHardwareMonitor.Hardware.Gpu.GenericGpu)?.DeviceId; }
+        catch (Exception) { }
+        // Read again for each new GPU, so one plugged in later (eGPU) is found too.
+        var adapters = GpuAdapters.Read();
+        var answer = _windowsIntegrated[id] = GpuAdapters.IsIntegrated(path, adapters, GpuAdapters.VendorOf(hw.HardwareType));
+        LogOnce("igpu:" + id, $"{hw.Name}: Windows says {(answer is { } a ? a ? "integrated" : "discrete" : "nothing")} " +
+                              $"({adapters.Count} adapters, device {path ?? "unknown"}).");
+    }
 
     List<WifiStatus> _wifi = new();
     long _wifiTick = long.MinValue / 2;
@@ -659,6 +676,7 @@ public sealed class HardwareService : IDisposable
                 sensors.Add(Synthetic(reading.Id, $"level/free-{char.ToLowerInvariant(v.Letter)}", $"{v.Letter}: free space", SensorType.Level, v.FreePercent));
         if (hw.HardwareType == HardwareType.Network && _wifi.FirstOrDefault(w => w.Matches(reading.Id)) is { } wifi)
             sensors.Add(Synthetic(reading.Id, "level/wifi-signal", "Wi-Fi signal", SensorType.Level, wifi.SignalPercent));
+        if (hw.HardwareType is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel) AskWindowsIfIntegrated(hw, reading.Id);
         if (hw.HardwareType == HardwareType.GpuNvidia)
         {
             if (_nvmlFeed.TryGet(hw.Name, out var feed))
@@ -789,9 +807,13 @@ public sealed class HardwareService : IDisposable
         return Regex.Replace(s, @"\s{2,}", " ").Trim();
     }
 
-    internal static bool IsIntegrated(HardwareReading g) =>
-        g.Type != HardwareType.GpuNvidia &&
-        (IntegratedGpuName.IsMatch(g.Name.Trim()) || (g.Value(SensorType.SmallData, "GPU Memory Total") ?? 0) is > 0 and < 2048);
+    /// <summary>
+    /// Windows' answer when it has one (<see cref="GpuAdapters"/>); otherwise the name, then less than
+    /// 2 GB of GPU memory. Newer iGPUs often reserve more than that, so their names are listed too.
+    /// </summary>
+    internal static bool IsIntegrated(HardwareReading g, bool? windowsIntegrated = null) =>
+        windowsIntegrated ?? (g.Type != HardwareType.GpuNvidia &&
+                              (IntegratedGpuName.IsMatch(g.Name.Trim()) || (g.Value(SensorType.SmallData, "GPU Memory Total") ?? 0) is > 0 and < 2048));
 
     /// <summary>The sensor's value, noting it as the source of history series <paramref name="alias"/>.</summary>
     static float? Track(Dictionary<string, string> sources, string alias, SensorReading? sensor)
@@ -801,12 +823,12 @@ public sealed class HardwareService : IDisposable
         return sensor.Value;
     }
 
-    static GpuSummary SummarizeGpu(HardwareReading g, Dictionary<string, string> sources) => new()
+    static GpuSummary SummarizeGpu(HardwareReading g, bool? windowsIntegrated, Dictionary<string, string> sources) => new()
     {
         Id = g.Id,
         Name = g.Name,
         ShortName = ShortName(g.Name),
-        Integrated = IsIntegrated(g),
+        Integrated = IsIntegrated(g, windowsIntegrated),
         Load = Track(sources, "gpu:" + g.Id, g.Find(SensorType.Load, "GPU Core", "D3D 3D")),
         Temp = Positive(Track(sources, "gputemp:" + g.Id, g.Find(SensorType.Temperature, "GPU Core", "GPU Edge", "GPU VR SoC") ?? g.FirstSensor(SensorType.Temperature))),
         HotSpot = Positive(g.Value(SensorType.Temperature, "GPU Hot Spot")),
@@ -823,7 +845,7 @@ public sealed class HardwareService : IDisposable
     };
 
     static Summary Summarize(IReadOnlyList<HardwareReading> all, string? preferredGpu, IReadOnlyDictionary<string, DriveDetails> drives,
-                             WifiStatus? wifi = null, PingStats? ping = null, string? pingTarget = null)
+                             IReadOnlyDictionary<string, bool?> windowsIntegrated, WifiStatus? wifi = null, PingStats? ping = null, string? pingTarget = null)
     {
         var cpu = all.FirstOrDefault(h => h.Type == HardwareType.Cpu);
         var memories = all.Where(h => h.Type == HardwareType.Memory).ToList();
@@ -852,7 +874,7 @@ public sealed class HardwareService : IDisposable
 
         // GPUs
         var gpus = all.Where(h => h.Type is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel)
-                      .Select(g => SummarizeGpu(g, sources)).ToList();
+                      .Select(g => SummarizeGpu(g, windowsIntegrated.GetValueOrDefault(g.Id), sources)).ToList();
         var primary = gpus.FirstOrDefault(g => g.Id == preferredGpu)
                       ?? gpus.FirstOrDefault(g => !g.Integrated)
                       ?? gpus.FirstOrDefault();
