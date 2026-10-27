@@ -10,6 +10,34 @@ public class StripFitTests
 
     static readonly TaskbarInfo Centred = Taskbar(new Rectangle(1655, 2088, 67, 72), new Rectangle(1722, 2088, 330, 72));
 
+    // Windows 10: left-aligned buttons, and the button area runs all the way to the tray.
+    static readonly Rectangle Win10Tasks = Rectangle.FromLTRB(400, 2088, 3315, 2160);
+    static readonly Rectangle[] Win10Buttons = { new(400, 2088, 90, 72), new(490, 2088, 90, 72), new(580, 2088, 90, 72) };
+
+    [Fact]
+    public void Windows_10_button_area_is_trimmed_to_the_last_button()
+    {
+        var tray = new Rectangle(3315, 2088, 525, 72);
+        Assert.True(StripFit.StretchesToTray(Win10Tasks, tray));
+        var trimmed = StripFit.TrimTasks(Win10Tasks, Win10Buttons);
+        Assert.Equal(Rectangle.FromLTRB(400, 2088, 670, 2160), trimmed);
+
+        // Before trimming there was no gap, so the strip fell back to the whole taskbar (over the buttons).
+        var (untrimmedLeft, _, _) = StripFit.FreeRegion(Taskbar(new Rectangle(0, 2088, 72, 72), Win10Tasks), WidgetPosition.NextToTray, 1.5f);
+        Assert.True(untrimmedLeft < 670);
+        var (left, right, _) = StripFit.FreeRegion(Taskbar(new Rectangle(0, 2088, 72, 72), trimmed), WidgetPosition.NextToTray, 1.5f);
+        Assert.Equal(670 + 12, left);
+        Assert.Equal(3315 - 12, right);
+    }
+
+    [Fact]
+    public void Windows_11_button_area_is_left_alone() =>
+        Assert.False(StripFit.StretchesToTray(Centred.Tasks, Centred.Tray));
+
+    [Fact]
+    public void No_buttons_leaves_only_the_start_side() =>
+        Assert.Equal(0, StripFit.TrimTasks(Win10Tasks, Array.Empty<Rectangle>()).Width);
+
     [Fact]
     public void Free_region_is_between_app_icons_and_tray()
     {

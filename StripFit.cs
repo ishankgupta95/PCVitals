@@ -10,6 +10,21 @@ static class StripFit
     /// The free stretch of taskbar the strip may use: between the app icons and the tray, or, for
     /// "left side", between the left edge and the icons (when there's room there).
     /// </summary>
+    /// <summary>
+    /// Windows 10's app-button area stretches to the tray however few buttons there are; trim it to
+    /// the last button (<paramref name="buttons"/>: their screen rects). Windows 11 reports the real
+    /// extent, which this leaves alone.
+    /// </summary>
+    public static bool StretchesToTray(Rectangle tasks, Rectangle tray) =>
+        tasks.Width > 0 && tray.Width > 0 && tasks.Right >= tray.Left - 2;
+
+    public static Rectangle TrimTasks(Rectangle tasks, IEnumerable<Rectangle> buttons)
+    {
+        int right = buttons.Where(b => b.Width > 0 && b.Left >= tasks.Left - 1 && b.Right <= tasks.Right + 1)
+                           .Select(b => b.Right).DefaultIfEmpty(tasks.Left).Max();
+        return Rectangle.FromLTRB(tasks.Left, tasks.Top, right, tasks.Bottom);
+    }
+
     public static (int Left, int Right, bool AnchorLeft) FreeRegion(TaskbarInfo tb, WidgetPosition position, float s)
     {
         int gap = (int)(8 * s);

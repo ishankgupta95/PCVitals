@@ -56,14 +56,105 @@ static class Native
         if (tb == IntPtr.Zero || !IsWindowVisible(tb)) return null;
         GetWindowRect(tb, out var r);
         var dpi = GetDpiForWindow(tb);
-        return new TaskbarInfo(tb, r.ToRectangle(), ChildRect(tb, "TrayNotifyWnd"), ChildRect(tb, "ReBarWindow32"),
+        var tray = ChildRect(tb, "TrayNotifyWnd");
+        return new TaskbarInfo(tb, r.ToRectangle(), tray, AppButtons(tb, ChildRect(tb, "ReBarWindow32"), tray),
                                ChildRect(tb, "Start"), dpi == 0 ? 96 : (int)dpi);
     }
+
+    static readonly Dictionary<IntPtr, (Rectangle Tasks, Rectangle Trimmed, long At)> ButtonCache = new();
+
+    /// <summary>
+    /// The app-button area, trimmed to the last button where it stretches to the tray (Windows 10).
+    /// The buttons come from the task list's accessibility tree; that's a few cross-process calls,
+    /// so the answer is reused for a second. If it can't be read, the area is left as it is.
+    /// </summary>
+    static Rectangle AppButtons(IntPtr taskbar, Rectangle tasks, Rectangle tray)
+    {
+        if (!StripFit.StretchesToTray(tasks, tray)) return tasks;
+        long now = Environment.TickCount64;
+        if (ButtonCache.TryGetValue(taskbar, out var cached) && cached.Tasks == tasks && now - cached.At < 1000) return cached.Trimmed;
+        var list = DescendantHandle(taskbar, "MSTaskListWClass");
+        var buttons = list == IntPtr.Zero ? null : AccessibleChildRects(list);
+        var trimmed = buttons == null ? tasks : StripFit.TrimTasks(tasks, buttons);
+        ButtonCache[taskbar] = (tasks, trimmed, now);
+        return trimmed;
+    }
+
+    /// <summary>"6 buttons, last ends at x=1434", for the taskbar report (hidden task lists too, as on Windows 11).</summary>
+    public static string AppButtonSummary(IntPtr taskbar)
+    {
+        var list = DescendantHandle(taskbar, "MSTaskListWClass", visibleOnly: false);
+        if (list == IntPtr.Zero) return "no task list window";
+        var buttons = AccessibleChildRects(list);
+        if (buttons == null) return "couldn't read the accessibility tree";
+        return buttons.Count == 0 ? "none" : $"{buttons.Count} buttons, last ends at x={buttons.Max(b => b.Right)}";
+    }
+
+    /// <summary>Screen rects of a window's accessible children (the task list's app buttons); null if unavailable.</summary>
+    internal static List<Rectangle>? AccessibleChildRects(IntPtr hwnd)
+    {
+        var iid = new Guid("618736e0-3c3d-11cf-810c-00aa00389b71"); // IID_IAccessible
+        object? obj = null;
+        try
+        {
+            if (AccessibleObjectFromWindow(hwnd, 0xFFFFFFFC /* OBJID_CLIENT */, ref iid, out obj) != 0 || obj is not Accessibility.IAccessible acc)
+                return null;
+            int count = acc.accChildCount;
+            var rects = new List<Rectangle>();
+            if (count <= 0) return rects;
+            var children = new object[count];
+            if (AccessibleChildren(acc, 0, count, children, out int got) < 0) return null;
+            foreach (var child in children.Take(got))
+            {
+                int l, t, w, h;
+                if (child is Accessibility.IAccessible a)
+                {
+                    a.accLocation(out l, out t, out w, out h, 0 /* CHILDID_SELF */);
+                    Marshal.ReleaseComObject(a);
+                }
+                else if (child is int id) acc.accLocation(out l, out t, out w, out h, id);
+                else continue;
+                rects.Add(new Rectangle(l, t, w, h));
+            }
+            return rects;
+        }
+        catch (Exception ex) when (ex is COMException or InvalidCastException or ArgumentException)
+        {
+            return null;
+        }
+        finally
+        {
+            if (obj != null && Marshal.IsComObject(obj)) Marshal.ReleaseComObject(obj);
+        }
+    }
+
+    [DllImport("oleacc.dll")]
+    static extern int AccessibleObjectFromWindow(IntPtr hwnd, uint objectId, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out object? obj);
+
+    [DllImport("oleacc.dll")]
+    static extern int AccessibleChildren(Accessibility.IAccessible container, int start, int count,
+                                         [Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 2)] object[] children, out int obtained);
 
     static Rectangle ChildRect(IntPtr parent, string cls)
     {
         var child = FindWindowEx(parent, IntPtr.Zero, cls, null);
         return child != IntPtr.Zero && GetWindowRect(child, out var r) ? r.ToRectangle() : Rectangle.Empty;
+    }
+
+    /// <summary>The first visible descendant (any depth) of class <paramref name="cls"/>, or zero.</summary>
+    static IntPtr DescendantHandle(IntPtr parent, string cls, bool visibleOnly = true)
+    {
+        var found = IntPtr.Zero;
+        var sb = new StringBuilder(64);
+        EnumChildWindows(parent, (h, _) =>
+        {
+            sb.Clear();
+            GetClassName(h, sb, sb.Capacity);
+            if (sb.ToString() != cls || (visibleOnly && !IsWindowVisible(h))) return true;
+            found = h;
+            return false;
+        }, IntPtr.Zero);
+        return found;
     }
 
     /// <summary>Rect of the first descendant (any depth) whose class is one of <paramref name="classes"/>.</summary>
@@ -113,7 +204,7 @@ static class Native
             int reserve = (int)(170 * (dpi == 0 ? 1 : dpi / 96f));
             clock = new Rectangle(bounds.Right - reserve, bounds.Top, reserve, bounds.Height);
         }
-        return new TaskbarInfo(handle, bounds, clock, DescendantRect(handle, "MSTaskListWClass", "ReBarWindow32"),
+        return new TaskbarInfo(handle, bounds, clock, AppButtons(handle, DescendantRect(handle, "MSTaskListWClass", "ReBarWindow32"), clock),
                                DescendantRect(handle, "Start"), dpi == 0 ? 96 : (int)dpi);
     }
 
