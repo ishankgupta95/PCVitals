@@ -339,7 +339,24 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         if (_snapshots == 2) EnableBatteryItemOnce(snap);
         // Discovery (drives especially) allocates a lot once. The deferred groups are found on the
         // second poll, so give everything back after the third.
-        if (_snapshots == 3) Native.TrimWorkingSet();
+        if (_snapshots == 3)
+        {
+            LogHeapAfterDiscovery();
+            Native.TrimWorkingSet();
+        }
+    }
+
+    /// <summary>
+    /// The heap's high point is drive discovery (~40 MB with 3 drives). Note it when it gets near the
+    /// GC's hard limit (PCVitals.csproj), so a many-drive PC that runs out of memory shows up in the log.
+    /// </summary>
+    static void LogHeapAfterDiscovery()
+    {
+        var info = GC.GetGCMemoryInfo();
+        long committedMb = info.TotalCommittedBytes >> 20, limitMb = info.TotalAvailableMemoryBytes >> 20;
+        if (committedMb * 2 >= limitMb)
+            Program.Log($"Managed heap after hardware discovery: {committedMb} MB committed of a {limitMb} MB limit " +
+                        $"({info.HeapSizeBytes >> 20} MB in use).");
     }
 
     // ---- Alerts -----------------------------------------------------------------------------

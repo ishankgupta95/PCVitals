@@ -160,8 +160,9 @@ How it stays light:
   0.2 W on average. While the dashboard is open, a helper process streams PCIe throughput and exact power; its
   memory goes away when the dashboard closes.
 - **Garbage doesn't pile up.** .NET sizes its youngest-generation budget from the CPU's L3 cache; on a 96 MB-L3
-  X3D chip that meant 40+ MB of garbage between collections. A 64 MB heap hard limit (the live heap is ~3–11 MB)
-  caps it at about 5 MB. Drive discovery's one-off ~40 MB of allocations are decommitted right after it finishes.
+  X3D chip that meant 40+ MB of garbage between collections. A 128 MB heap hard limit (the live heap is ~3–11 MB,
+  with room for drive discovery on PCs with many drives) caps it at a few MB. Drive discovery's one-off ~40 MB of
+  allocations are decommitted right after it finishes.
 - **Per-engine Direct3D counters** (about 20 per GPU) are only read while the dashboard is open. The headline
   GPU load comes from NVAPI/ADL.
 - **Demand-driven polling**: drive SMART data, DIMM SPD (over SMBus), the motherboard sensor chip and the
