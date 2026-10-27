@@ -123,16 +123,24 @@ public class FullscreenTests
 
     [Fact]
     public void Borderless_window_covering_the_monitor_is_fullscreen() =>
-        Assert.True(Native.IsFullscreen(Monitor, Monitor, maximized: false));
+        Assert.True(Native.IsFullscreen(Monitor, Monitor, framedMaximized: false));
 
     [Fact]
     public void Maximised_window_over_an_auto_hiding_taskbar_is_not()
     {
         // Maximised windows overhang the monitor by their border width on every side.
-        Assert.False(Native.IsFullscreen(new Rectangle(-8, -8, 2576, 1456), Monitor, maximized: true));
+        Assert.False(Native.IsFullscreen(new Rectangle(-8, -8, 2576, 1456), Monitor, framedMaximized: true));
+    }
+
+    [Fact]
+    public void Browser_fullscreen_from_maximised_has_no_frame()
+    {
+        // Window styles read from Chrome maximised, then after going fullscreen (it stays maximised).
+        Assert.True(Native.HasFrame(0x17CF0000));
+        Assert.False(Native.HasFrame(0x170B0000));
     }
 
     [Fact]
     public void Ordinary_windows_are_not() =>
-        Assert.False(Native.IsFullscreen(new Rectangle(100, 100, 1600, 900), Monitor, maximized: false));
+        Assert.False(Native.IsFullscreen(new Rectangle(100, 100, 1600, 900), Monitor, framedMaximized: false));
 }

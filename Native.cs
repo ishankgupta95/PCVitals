@@ -128,17 +128,30 @@ static class Native
         if (!GetWindowRect(fg, out var r)) return false;
         var screen = Screen.FromHandle(fg);
         return screen.DeviceName == Screen.FromHandle(taskbar).DeviceName &&
-               IsFullscreen(Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom), screen.Bounds, IsZoomed(fg));
+               IsFullscreen(Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom), screen.Bounds, IsZoomed(fg) && HasFrame(fg));
     }
+
+    const int GWL_STYLE = -16;
+    const uint WS_CAPTION = 0x00C00000, WS_THICKFRAME = 0x00040000;
+
+    /// <summary>
+    /// True when the window has a title bar or resize border. Browsers going fullscreen from a
+    /// maximised window (YouTube, F11) stay maximised but drop both.
+    /// </summary>
+    static bool HasFrame(IntPtr hwnd) => HasFrame(GetWindowLong(hwnd, GWL_STYLE));
+
+    internal static bool HasFrame(uint style) => (style & (WS_CAPTION | WS_THICKFRAME)) != 0;
 
     /// <summary>
     /// A window counts as fullscreen when it covers the whole monitor and isn't simply maximised.
     /// With an auto-hiding taskbar a maximised window covers the monitor too (slightly overlapping
     /// it with its borders), yet the taskbar still slides up over it, so the stats should too.
-    /// Fullscreen games, videos and browsers use borderless windows sized to the screen instead.
+    /// Fullscreen games, videos and browsers use borderless windows sized to the screen instead
+    /// (Chrome keeps the maximised flag when going fullscreen from maximised, so the caller only
+    /// passes <paramref name="framedMaximized"/> for a maximised window that still has a frame).
     /// </summary>
-    internal static bool IsFullscreen(Rectangle window, Rectangle monitor, bool maximized) =>
-        !maximized && window.Left <= monitor.Left && window.Top <= monitor.Top && window.Right >= monitor.Right && window.Bottom >= monitor.Bottom;
+    internal static bool IsFullscreen(Rectangle window, Rectangle monitor, bool framedMaximized) =>
+        !framedMaximized && window.Left <= monitor.Left && window.Top <= monitor.Top && window.Right >= monitor.Right && window.Bottom >= monitor.Bottom;
 
     /// <summary>"Chrome_WidgetWin_1 (-8,-8)-(2568,1448) maximised", for the taskbar report.</summary>
     public static string ForegroundSummary()
@@ -148,11 +161,14 @@ static class Native
         var cls = new StringBuilder(64);
         GetClassName(fg, cls, cls.Capacity);
         GetWindowRect(fg, out var r);
-        return $"{cls} ({r.Left},{r.Top})-({r.Right},{r.Bottom}){(IsZoomed(fg) ? " maximised" : "")}";
+        return $"{cls} ({r.Left},{r.Top})-({r.Right},{r.Bottom}){(IsZoomed(fg) ? " maximised" : "")}{(HasFrame(fg) ? "" : " frameless")}";
     }
 
     [DllImport("user32.dll")]
     static extern bool IsZoomed(IntPtr hWnd);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    static extern uint GetWindowLong(IntPtr hWnd, int index);
 
     delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
 
