@@ -354,7 +354,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     {
         var info = GC.GetGCMemoryInfo();
         long committedMb = info.TotalCommittedBytes >> 20, limitMb = info.TotalAvailableMemoryBytes >> 20;
-        if (committedMb * 2 >= limitMb)
+        if (committedMb * 4 >= limitMb * 3)
             Program.Log($"Managed heap after hardware discovery: {committedMb} MB committed of a {limitMb} MB limit " +
                         $"({info.HeapSizeBytes >> 20} MB in use).");
     }

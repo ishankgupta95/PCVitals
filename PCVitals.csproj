@@ -44,9 +44,10 @@
     <RuntimeHostConfigurationOption Include="System.GC.RetainVM" Value="false" />
     <!-- The gen0 budget scales with L3 cache size; on big-cache CPUs (e.g. 96 MB on X3D parts) it let
          ~40+ MB of garbage pile up between collections. A hard limit caps the budget at ~5 MB.
-         The live heap is ~3-11 MB, but drive discovery allocates ~40 MB once with 3 drives, so 128 MB
-         leaves room for PCs with many drives. TrayContext logs the heap when discovery comes near it. -->
-    <RuntimeHostConfigurationOption Include="System.GC.HeapHardLimit" Value="0x8000000" />
+         The live heap is ~3-11 MB and drive discovery allocates ~40 MB once with 3 drives. The budget is a
+         fraction of the limit: 128 MB cost ~5 MB more private memory at idle, so it stays at 64 MB. TrayContext
+         logs the heap when discovery comes near it (many drives). -->
+    <RuntimeHostConfigurationOption Include="System.GC.HeapHardLimit" Value="0x4000000" />
   </ItemGroup>
 
   <ItemGroup>
