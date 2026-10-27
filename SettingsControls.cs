@@ -697,6 +697,13 @@ sealed class LivePreview : Control
         var f = UiFonts.For(DeviceDpi);
         var (image, note) = _render(this);
         int noteH = note != null ? Ui.S(this, 40) : 0;
+        // Fit the box to what it shows (plus a note), instead of a fixed height with empty bands.
+        if (image != null)
+        {
+            float fit = Math.Min(1f, (Width - 1 - Ui.S(this, 24)) / (float)image.Width);
+            int want = (int)(image.Height * fit) + Ui.S(this, 32) + noteH + 1;
+            if (want != Height) BeginInvoke(() => Height = want);
+        }
         var area = new Rectangle(0, 0, Width - 1, Height - 1 - noteH);
         bool light = Theme.TaskbarIsLight();
         Gfx.FillRounded(g, area, Ui.S(this, 8), light ? Color.FromArgb(238, 238, 242) : Color.FromArgb(28, 30, 36));

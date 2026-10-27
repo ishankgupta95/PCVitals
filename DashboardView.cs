@@ -337,7 +337,9 @@ sealed class DashboardView : Control
             int ww = Gfx.TextWidth(g, b.Text, _f.Small) + S(20);
             var r = new Rectangle((width - ww) / 2, S(16), ww, S(26));
             Gfx.FillRounded(g, r, S(13), Theme.WithAlpha(Theme.Warn, r.Contains(_mouse) ? 60 : 36));
-            Gfx.Text(g, b.Text, _f.Small, Theme.Warn, r, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            // The light theme's amber is ~3.3:1 on its own tint; a darker amber reads at ~5.5:1.
+            var ink = Theme.IsLight ? Color.FromArgb(128, 78, 0) : Theme.Warn;
+            Gfx.Text(g, b.Text, _f.Small, ink, r, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             _hits.Add((r, b.Action, b.Text));
         }
 

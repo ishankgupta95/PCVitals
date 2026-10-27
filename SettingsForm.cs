@@ -305,7 +305,7 @@ sealed class SettingsForm : Form
                                 Toggle(_s.WidgetEnabled, v => _s.WidgetEnabled = v), ""));
 
         p.Controls.Add(Section("Items"));
-        p.Controls.Add(Hint("Turn items on or off, rename their labels (leave empty for none), and reorder them. Items at the end are the first to be hidden if the taskbar runs out of room."));
+        p.Controls.Add(Hint("Turn items on or off, rename their labels (leave empty for none), and drag them (or use the arrows) to reorder. Items at the end are the first to be hidden if the taskbar runs out of room."));
         _itemsHost = new FlowLayoutPanel
         {
             FlowDirection = FlowDirection.TopDown,
@@ -387,10 +387,56 @@ sealed class SettingsForm : Form
             if (item.Kind == WidgetKind.Sensor)
                 controls.Add(new PillButton("", () => RemoveItem(index), 34) { Glyph = "", AccessibleName = $"Remove {name}" });
             controls.Add(toggle);
-            host.Controls.Add(new Card(name, description, new AccessoryRow(controls.ToArray())));
+            var card = new Card(name, description, new AccessoryRow(controls.ToArray()), glyph: "") { Cursor = Cursors.SizeNS };
+            DragToReorder(card, host);
+            host.Controls.Add(card);
         }
         host.ResumeLayout();
         if (host.Parent is FlowLayoutPanel page) Stretch(page);
+    }
+
+    /// <summary>
+    /// Drag a taskbar item's card up or down to reorder (the arrow buttons still do it from the keyboard).
+    /// The card moves as you drag; the new order is saved on release.
+    /// </summary>
+    void DragToReorder(Control card, FlowLayoutPanel host)
+    {
+        int from = -1, startY = 0;
+        bool dragging = false;
+        card.MouseDown += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            from = host.Controls.GetChildIndex(card);
+            startY = e.Y;
+        };
+        card.MouseMove += (_, e) =>
+        {
+            if (from < 0 || (e.Button & MouseButtons.Left) == 0) return;
+            if (!dragging && Math.Abs(e.Y - startY) < SystemInformation.DragSize.Height) return;
+            dragging = true;
+            int y = host.PointToClient(card.PointToScreen(e.Location)).Y;
+            var cards = host.Controls.Cast<Control>().ToList();
+            int target = cards.FindIndex(c => y < c.Bottom);
+            if (target < 0) target = cards.Count - 1;
+            if (target != host.Controls.GetChildIndex(card)) host.Controls.SetChildIndex(card, target);
+        };
+        card.MouseUp += (_, _) =>
+        {
+            int to = host.Controls.GetChildIndex(card);
+            if (dragging && from >= 0 && to != from && from < _s.WidgetItems.Count)
+            {
+                var item = _s.WidgetItems[from];
+                _s.WidgetItems.RemoveAt(from);
+                _s.WidgetItems.Insert(Math.Min(to, _s.WidgetItems.Count), item);
+                BeginInvoke(() =>
+                {
+                    BuildItemRows();
+                    Changed();
+                });
+            }
+            dragging = false;
+            from = -1;
+        };
     }
 
     (string Name, string Description) DescribeSensor(WidgetItem item)
