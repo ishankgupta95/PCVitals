@@ -76,7 +76,13 @@ sealed class NvmlFeed
         lock (_latest) _latest[parts[0]] = new Reading(mw / 1000f, rxKb * 1024, txKb * 1024);
     }
 
-    /// <summary>The helper: "name, rx KB/s, tx KB/s, mW" per GPU per second until the parent exits.</summary>
+    /// <summary>
+    /// How a card is known to the feed and to power calibration: its name, plus its PCI bus when
+    /// another card has the same name. Unique names stay plain, so saved calibrations keep working.
+    /// </summary>
+    public static string Key(string name, uint? busWhenShared) => busWhenShared is { } bus ? $"{name} (bus {bus})" : name;
+
+    /// <summary>The helper: "key, rx KB/s, tx KB/s, mW" per GPU per second until the parent exits.</summary>
     public static unsafe int RunChild(int parentPid)
     {
         if (!NativeLibrary.TryLoad("nvml.dll", typeof(NvmlFeed).Assembly, DllImportSearchPath.System32, out var lib)) return 1;
@@ -98,6 +104,18 @@ sealed class NvmlFeed
             if (byIndex(i, &dev) != 0) continue;
             string name = getName(dev, buf, 96) == 0 ? Marshal.PtrToStringUTF8((IntPtr)buf) ?? $"GPU {i}" : $"GPU {i}";
             devices.Add((dev, name));
+        }
+        // Identical cards: tell them apart by PCI bus (nvmlPciInfo_t: domain at 16, bus at 20; 68 bytes).
+        if (devices.GroupBy(d => d.Name).Any(g => g.Count() > 1) && NativeLibrary.TryGetExport(lib, "nvmlDeviceGetPciInfo_v3", out var pciExport))
+        {
+            var pciInfo = (delegate* unmanaged<IntPtr, byte*, int>)pciExport;
+            var info = stackalloc byte[68];
+            for (int i = 0; i < devices.Count; i++)
+            {
+                var (dev, name) = devices[i];
+                if (devices.Count(d => d.Name == name) > 1 && pciInfo(dev, info) == 0)
+                    devices[i] = (dev, Key(name, *(uint*)(info + 20)));
+            }
         }
 
         Process? parent = null;

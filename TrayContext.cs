@@ -414,7 +414,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     void StartPowerCalibrationIfNeeded(Snapshot snap, bool force = false)
     {
         var missing = snap.Hardware.Where(h => h.Type == LibreHardwareMonitor.Hardware.HardwareType.GpuNvidia)
-                                   .Any(h => force || !_settings.GpuPowerPerPercent.ContainsKey(h.Name));
+                                   .Any(h => force || !_settings.GpuPowerPerPercent.ContainsKey(_hw.GpuKey(h.Id, h.Name)));
         if (_calibrationStarted || !_hw.GpuPowerEstimated || !missing) return;
         _calibrationStarted = true;
         var file = Path.Combine(Path.GetTempPath(), $"pcvitals-calibration-{Environment.ProcessId}.txt");

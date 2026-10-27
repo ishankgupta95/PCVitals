@@ -138,6 +138,13 @@ public class HardwareTests
     }
 
     [Fact]
+    public void Twin_cards_are_told_apart_by_pci_bus()
+    {
+        Assert.Equal("NVIDIA GeForce RTX 5080", NvmlFeed.Key("NVIDIA GeForce RTX 5080", null));
+        Assert.Equal("NVIDIA GeForce RTX 5080 (bus 65)", NvmlFeed.Key("NVIDIA GeForce RTX 5080", 65));
+    }
+
+    [Fact]
     public void Disagreeing_adapters_give_no_answer() =>
         Assert.Null(GpuAdapters.IsIntegrated(@"\\?\PCI#VEN_1002&DEV_1234#1",
             new GpuAdapters.Adapter[] { new(0x1002, 0x1234, 1, true), new(0x1002, 0x1234, 2, false) }));

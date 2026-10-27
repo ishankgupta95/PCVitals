@@ -405,6 +405,47 @@ public sealed class HardwareService : IDisposable
         catch (Exception) { return null; }
     }
 
+    readonly Dictionary<string, string> _gpuKeys = new();
+
+    /// <summary>
+    /// The key a card's NVML feed and power calibration use (<see cref="NvmlFeed.Key"/>), by hardware id.
+    /// Callable from any thread.
+    /// </summary>
+    public string GpuKey(string gpuId, string name)
+    {
+        lock (_gpuKeys) return _gpuKeys.TryGetValue(gpuId, out var key) ? key : name;
+    }
+
+    void LearnGpuKey(IHardware hw, string id)
+    {
+        lock (_gpuKeys)
+        {
+            if (_gpuKeys.ContainsKey(id)) return;
+            bool twin = _computer.Hardware.Count(h => h.HardwareType == hw.HardwareType && h.Name == hw.Name) > 1;
+            uint? bus = twin ? NvidiaBus(hw) : null;
+            if (twin && bus == null) LogOnce("gpu-twins", $"Two {hw.Name} cards, but their PCI buses couldn't be read; they share a power calibration.");
+            _gpuKeys[id] = NvmlFeed.Key(hw.Name, bus);
+        }
+    }
+
+    /// <summary>The card's PCI bus via LibreHardwareMonitor's NVAPI binding (internal, so by reflection).</summary>
+    static uint? NvidiaBus(IHardware hw)
+    {
+        try
+        {
+            var handle = hw.GetType().GetField("_handle", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(hw);
+            var nvapi = typeof(Computer).Assembly.GetType("LibreHardwareMonitor.Interop.NvApi");
+            var getBusId = nvapi?.GetProperty("NvAPI_GPU_GetBusId", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(null) as Delegate;
+            if (handle == null || getBusId == null) return null;
+            var args = new object?[] { handle, 0u };
+            return Convert.ToInt32(getBusId.DynamicInvoke(args)) == 0 && args[1] is uint bus ? bus : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     /// <summary>GPUs Windows reports powered down (D3); they aren't polled, so they can stay asleep (poll thread only).</summary>
     readonly HashSet<string> _sleepingGpus = new();
     readonly Dictionary<string, string?> _gpuInstances = new();
@@ -733,20 +774,22 @@ public sealed class HardwareService : IDisposable
         if (hw.HardwareType is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel) AskWindowsIfIntegrated(hw, reading.Id);
         if (hw.HardwareType == HardwareType.GpuNvidia && !asleep)
         {
-            if (_nvmlFeed.TryGet(hw.Name, out var feed))
+            LearnGpuKey(hw, reading.Id);
+            var key = GpuKey(reading.Id, hw.Name);
+            if (_nvmlFeed.TryGet(key, out var feed))
             {
                 // Same names LibreHardwareMonitor uses when it has NVML itself.
                 sensors.Add(Synthetic(reading.Id, "power/package", "GPU Package", SensorType.Power, feed.Watts));
                 sensors.Add(Synthetic(reading.Id, "throughput/pcie-rx", "GPU PCIe Rx", SensorType.Throughput, feed.RxBytes));
                 sensors.Add(Synthetic(reading.Id, "throughput/pcie-tx", "GPU PCIe Tx", SensorType.Throughput, feed.TxBytes));
             }
-            CalibrateOrEstimatePower(reading, sensors);
+            CalibrateOrEstimatePower(reading, key, sensors);
         }
         into.Add(reading);
         foreach (var sub in hw.SubHardware) Collect(sub, into, top);
     }
 
-    void CalibrateOrEstimatePower(HardwareReading gpu, List<SensorReading> sensors)
+    void CalibrateOrEstimatePower(HardwareReading gpu, string key, List<SensorReading> sensors)
     {
         var pct = gpu.Value(SensorType.Load, "GPU Power");
         if (pct is not > 0) return;
@@ -762,10 +805,10 @@ public sealed class HardwareService : IDisposable
             bool changed;
             lock (PowerPerPercent)
             {
-                PowerPerPercent.TryGetValue(gpu.Name, out var old);
+                PowerPerPercent.TryGetValue(key, out var old);
                 float next = old <= 0 ? sample : old * 0.9f + sample * 0.1f;
                 changed = old <= 0 || Math.Abs(next - old) / old > 0.01f;
-                PowerPerPercent[gpu.Name] = next;
+                PowerPerPercent[key] = next;
             }
             if (changed) PowerCalibrationChanged?.Invoke();
             return;
@@ -773,7 +816,7 @@ public sealed class HardwareService : IDisposable
 
         float ratio;
         lock (PowerPerPercent)
-            if (!PowerPerPercent.TryGetValue(gpu.Name, out ratio) || ratio <= 0) return;
+            if (!PowerPerPercent.TryGetValue(key, out ratio) || ratio <= 0) return;
         float watts = pct.Value * ratio;
         var range = _estimatedRange.TryGetValue(gpu.Id, out var r) ? (Math.Min(r.Min, watts), Math.Max(r.Max, watts)) : (watts, watts);
         _estimatedRange[gpu.Id] = range;
