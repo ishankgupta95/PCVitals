@@ -44,6 +44,7 @@ sealed class SettingsForm : Form
     readonly List<Control> _live = new();
     Label? _usage;
     FlowLayoutPanel? _itemsHost;
+    CardDragger? _itemDragger;
 
     public string CurrentPage => _nav.Selected;
 
@@ -316,6 +317,7 @@ sealed class SettingsForm : Form
             Tag = "stretch-list",
         };
         p.Controls.Add(_itemsHost);
+        _itemDragger = new CardDragger(_itemsHost, ItemDropped);
         BuildItemRows();
         var addSensor = new PillButton("Add sensor…", AddSensor) { Margin = new Padding(0, 4, 0, 8), AccessibleName = "Add a sensor to the taskbar" };
         p.Controls.Add(addSensor);
@@ -388,55 +390,26 @@ sealed class SettingsForm : Form
                 controls.Add(new PillButton("", () => RemoveItem(index), 34) { Glyph = "", AccessibleName = $"Remove {name}" });
             controls.Add(toggle);
             var card = new Card(name, description, new AccessoryRow(controls.ToArray()), glyph: "") { Cursor = Cursors.SizeNS };
-            DragToReorder(card, host);
+            _itemDragger?.Attach(card);
             host.Controls.Add(card);
         }
         host.ResumeLayout();
         if (host.Parent is FlowLayoutPanel page) Stretch(page);
     }
 
-    /// <summary>
-    /// Drag a taskbar item's card up or down to reorder (the arrow buttons still do it from the keyboard).
-    /// The card moves as you drag; the new order is saved on release.
-    /// </summary>
-    void DragToReorder(Control card, FlowLayoutPanel host)
+    /// <summary>Saves a drag-and-drop reorder of the taskbar items (the arrow buttons do it from the keyboard).</summary>
+    void ItemDropped(int from, int to)
     {
-        int from = -1, startY = 0;
-        bool dragging = false;
-        card.MouseDown += (_, e) =>
+        if (from < 0 || from >= _s.WidgetItems.Count) return;
+        var item = _s.WidgetItems[from];
+        _s.WidgetItems.RemoveAt(from);
+        _s.WidgetItems.Insert(Math.Min(to, _s.WidgetItems.Count), item);
+        // Rebuild after the mouse-up finishes; the dropped card is one of the controls being replaced.
+        BeginInvoke(() =>
         {
-            if (e.Button != MouseButtons.Left) return;
-            from = host.Controls.GetChildIndex(card);
-            startY = e.Y;
-        };
-        card.MouseMove += (_, e) =>
-        {
-            if (from < 0 || (e.Button & MouseButtons.Left) == 0) return;
-            if (!dragging && Math.Abs(e.Y - startY) < SystemInformation.DragSize.Height) return;
-            dragging = true;
-            int y = host.PointToClient(card.PointToScreen(e.Location)).Y;
-            var cards = host.Controls.Cast<Control>().ToList();
-            int target = cards.FindIndex(c => y < c.Bottom);
-            if (target < 0) target = cards.Count - 1;
-            if (target != host.Controls.GetChildIndex(card)) host.Controls.SetChildIndex(card, target);
-        };
-        card.MouseUp += (_, _) =>
-        {
-            int to = host.Controls.GetChildIndex(card);
-            if (dragging && from >= 0 && to != from && from < _s.WidgetItems.Count)
-            {
-                var item = _s.WidgetItems[from];
-                _s.WidgetItems.RemoveAt(from);
-                _s.WidgetItems.Insert(Math.Min(to, _s.WidgetItems.Count), item);
-                BeginInvoke(() =>
-                {
-                    BuildItemRows();
-                    Changed();
-                });
-            }
-            dragging = false;
-            from = -1;
-        };
+            BuildItemRows();
+            Changed();
+        });
     }
 
     (string Name, string Description) DescribeSensor(WidgetItem item)

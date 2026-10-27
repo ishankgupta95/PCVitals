@@ -135,6 +135,21 @@ sealed class Card : Control
         }
     }
 
+    bool _placeholder;
+
+    /// <summary>Drawn as an empty dashed slot while the card itself is being dragged (<see cref="CardDragger"/>).</summary>
+    public bool Placeholder
+    {
+        get => _placeholder;
+        set
+        {
+            if (_placeholder == value) return;
+            _placeholder = value;
+            if (_accessory != null) _accessory.Visible = !value;
+            Invalidate();
+        }
+    }
+
     int TextLeft => Ui.S(this, _glyph != null ? 56 : 18);
 
     int AccessoryWidth => _accessory?.Width ?? 0;
@@ -160,6 +175,16 @@ sealed class Card : Control
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.Clear(Parent?.BackColor ?? Theme.Bg);
+        if (_placeholder)
+        {
+            // Where the dragged card will land.
+            var slot = new Rectangle(1, 1, Width - 3, Height - 3);
+            Gfx.FillRounded(g, slot, Ui.S(this, 8), Theme.WithAlpha(Theme.Cpu, 18));
+            using var path = Gfx.RoundedPath(slot, Ui.S(this, 8));
+            using var dash = new Pen(Theme.WithAlpha(Theme.Cpu, 150), Math.Max(1.5f, Ui.S(this, 1.5f))) { DashStyle = DashStyle.Dash };
+            g.DrawPath(dash, path);
+            return;
+        }
         Gfx.FillRounded(g, new Rectangle(0, 0, Width - 1, Height - 1), Ui.S(this, 8), Theme.Surface);
         var f = UiFonts.For(DeviceDpi);
         int pad = Ui.S(this, 18);
@@ -848,5 +873,186 @@ sealed class SettingsPage : FlowLayoutPanel
         // Child positions are relative to the scrolled view; AutoScrollPosition.Y is negative when scrolled down.
         int content = bottom - AutoScrollPosition.Y + Padding.Bottom;
         if (AutoScrollMinSize.Height != content) AutoScrollMinSize = new Size(0, content);
+    }
+}
+
+/// <summary>
+/// Drag-and-drop reordering of the cards in a top-down list: the picked-up card lifts into a floating
+/// copy that follows the pointer, its slot becomes a dashed gap that moves to where it will land, and
+/// the page scrolls near its edges. Release drops it there; Esc puts it back.
+/// </summary>
+sealed class CardDragger : IMessageFilter
+{
+    readonly FlowLayoutPanel _list;
+    readonly Action<int, int> _moved;
+    readonly System.Windows.Forms.Timer _scroll = new() { Interval = 30 };
+    Card? _card;
+    Point _down, _grab;
+    int _from;
+    bool _dragging;
+    DragGhost? _ghost;
+
+    public CardDragger(FlowLayoutPanel list, Action<int, int> moved)
+    {
+        _list = list;
+        _moved = moved;
+        _scroll.Tick += (_, _) => ScrollNearEdges();
+    }
+
+    public void Attach(Card card)
+    {
+        card.MouseDown += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            _card = card;
+            _down = e.Location;
+        };
+        card.MouseMove += (_, e) =>
+        {
+            if (_card != card || (e.Button & MouseButtons.Left) == 0) return;
+            if (!_dragging)
+            {
+                var size = SystemInformation.DragSize;
+                if (Math.Abs(e.X - _down.X) < size.Width && Math.Abs(e.Y - _down.Y) < size.Height) return;
+                Start(card);
+            }
+            Track();
+        };
+        card.MouseUp += (_, _) =>
+        {
+            if (_card == card) Finish(cancel: false);
+        };
+        // Alt+Tab or a click elsewhere mid-drag: keep the card where it is now.
+        card.MouseCaptureChanged += (_, _) =>
+        {
+            if (_dragging && _card == card && !card.Capture) Finish(cancel: false);
+        };
+    }
+
+    void Start(Card card)
+    {
+        _dragging = true;
+        _from = _list.Controls.GetChildIndex(card);
+        _grab = _down;
+        var bmp = new Bitmap(card.Width, card.Height);
+        card.DrawToBitmap(bmp, new Rectangle(Point.Empty, card.Size));
+        using (var g = Graphics.FromImage(bmp))
+        using (var path = Gfx.RoundedPath(new Rectangle(1, 1, bmp.Width - 3, bmp.Height - 3), Ui.S(card, 8)))
+        using (var pen = new Pen(Theme.Cpu, Math.Max(1.5f, Ui.S(card, 1.5f))))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.DrawPath(pen, path);
+        }
+        _ghost = new DragGhost(bmp) { Location = card.PointToScreen(Point.Empty) };
+        _ghost.Show(card.FindForm());
+        card.Placeholder = true;
+        Application.AddMessageFilter(this);
+        _scroll.Start();
+    }
+
+    /// <summary>Moves the floating copy to the pointer and the gap to where it would land.</summary>
+    void Track()
+    {
+        if (_card == null || _ghost == null) return;
+        var pointer = Cursor.Position;
+        // Vertical only: the copy stays in the list's column.
+        int left = _list.PointToScreen(new Point(_card.Left, 0)).X;
+        _ghost.Location = new Point(left, pointer.Y - _grab.Y);
+
+        int y = _list.PointToClient(pointer).Y;
+        int target = 0;
+        foreach (Control c in _list.Controls)
+            if (c != _card && c.Top + c.Height / 2 < y) target++;
+        if (target != _list.Controls.GetChildIndex(_card)) _list.Controls.SetChildIndex(_card, target);
+    }
+
+    void ScrollNearEdges()
+    {
+        var page = Ancestors(_list).OfType<ScrollableControl>().FirstOrDefault(s => s.AutoScroll);
+        if (page == null || _card == null) return;
+        var view = page.RectangleToScreen(page.ClientRectangle);
+        int zone = Ui.S(page, 48), y = Cursor.Position.Y;
+        int step = y < view.Top + zone ? -(view.Top + zone - y) / 2 : y > view.Bottom - zone ? (y - (view.Bottom - zone)) / 2 : 0;
+        if (step == 0) return;
+        page.AutoScrollPosition = new Point(0, Math.Max(0, -page.AutoScrollPosition.Y + step));
+        Track();
+    }
+
+    static IEnumerable<Control> Ancestors(Control c)
+    {
+        for (var p = c.Parent; p != null; p = p.Parent) yield return p;
+    }
+
+    void Finish(bool cancel)
+    {
+        var card = _card;
+        _card = null;
+        if (!_dragging || card == null) return;
+        _dragging = false;
+        _scroll.Stop();
+        Application.RemoveMessageFilter(this);
+        _ghost?.Close();
+        _ghost?.Dispose();
+        _ghost = null;
+        if (cancel) _list.Controls.SetChildIndex(card, _from);
+        card.Placeholder = false;
+        int to = _list.Controls.GetChildIndex(card);
+        if (to != _from) _moved(_from, to);
+    }
+
+    public bool PreFilterMessage(ref Message m)
+    {
+        const int WM_KEYDOWN = 0x0100, VK_ESCAPE = 0x1B;
+        if (m.Msg != WM_KEYDOWN || (int)m.WParam != VK_ESCAPE || !_dragging) return false;
+        var card = _card;
+        Finish(cancel: true);
+        // After Finish, so losing the capture doesn't count as a drop.
+        if (card != null) card.Capture = false;
+        return true;
+    }
+}
+
+/// <summary>The floating copy of a card being dragged: never activates and lets clicks through.</summary>
+sealed class DragGhost : Form
+{
+    readonly Bitmap _image;
+
+    public DragGhost(Bitmap image)
+    {
+        _image = image;
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        AutoScaleMode = AutoScaleMode.None;
+        Size = image.Size;
+        Opacity = 0.94;
+        BackColor = Theme.Surface;
+    }
+
+    protected override bool ShowWithoutActivation => true;
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ClassStyle |= 0x20000;                    // CS_DROPSHADOW
+            cp.ExStyle |= 0x80 | 0x08000000 | 0x20;      // TOOLWINDOW | NOACTIVATE | TRANSPARENT
+            return cp;
+        }
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        Native.ApplyRoundedDarkFrame(Handle);
+    }
+
+    protected override void OnPaint(PaintEventArgs e) => e.Graphics.DrawImageUnscaled(_image, 0, 0);
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _image.Dispose();
+        base.Dispose(disposing);
     }
 }
