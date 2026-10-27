@@ -187,9 +187,13 @@ static class Program
     static int Dump(string path)
     {
         using var hw = new HardwareService { DetailedMode = true };
+        // Like the app, the report only pings when the user turned ping on (Settings → General).
+        var settings = AppSettings.Load();
+        using var latency = settings.PingEnabled ? new LatencyMonitor(settings.PingHost, intervalMs: 1000) : null;
+        hw.Latency = latency;
         hw.EnableDeferredGroups();
         hw.UpdateOnce();
-        Thread.Sleep(1000); // load and throughput sensors need two samples
+        Thread.Sleep(3000); // load and throughput sensors need two samples; a few pings
         var snap = hw.UpdateOnce();
 
         var sb = new StringBuilder();
@@ -199,6 +203,11 @@ static class Program
         foreach (var g in s.Gpus)
             sb.AppendLine($"GPU  {g.Name} ({g.ShortName}) integrated={g.Integrated} primary={g == s.Gpu}: load {g.Load} temp {g.Temp} power {g.Power} vram {g.VramUsedMb}/{g.VramTotalMb}");
         sb.AppendLine($"RAM  {s.RamUsedGb}/{s.RamTotalGb} GB ({s.RamLoad}%)  board {s.BoardName} chipset {s.ChipsetTemp}  net {s.NetDown}/{s.NetUp}");
+        foreach (var d in s.Disks)
+            sb.AppendLine($"DISK {d.Name} [{d.Letters}] health {d.Health.Word}{(d.Health.Notes.Count > 0 ? ": " + string.Join(" ", d.Health.Notes) : "")}"
+                          + string.Concat(d.Volumes.Select(v => $"  {v.Letter}: {v.FreePercent:0}% free")));
+        sb.AppendLine(s.Wifi is { } w ? $"WIFI {w.Ssid} signal {w.SignalPercent}% link {w.RxMbps}/{w.TxMbps} Mbps" : "WIFI not connected");
+        sb.AppendLine(s.Ping is { } p ? $"PING {s.PingTarget}: avg {p.AvgMs:0.0} ms jitter {p.JitterMs:0.0} ms loss {p.LossPercent:0}% ({p.Samples} pings)" : latency == null ? "PING off" : "PING no replies yet");
         foreach (var h in snap.Hardware)
         {
             sb.AppendLine();

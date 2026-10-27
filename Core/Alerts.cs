@@ -15,11 +15,15 @@ public enum AlertCondition
 public sealed class AlertRule
 {
     /// <summary>Headline readings a rule can watch without picking a sensor.</summary>
-    public static readonly IReadOnlyDictionary<string, (string Name, SensorType Type)> SeriesTargets = new Dictionary<string, (string, SensorType)>
+    /// <remarks>Unit is shown after limits and values; "health" values are <see cref="HealthLevel"/> numbers (2 = Caution, 3 = Bad).</remarks>
+    public static readonly IReadOnlyDictionary<string, (string Name, SensorType Type, string Unit)> SeriesTargets = new Dictionary<string, (string, SensorType, string)>
     {
-        ["cputemp"] = ("CPU temperature", SensorType.Temperature),
-        ["gputemp"] = ("GPU temperature", SensorType.Temperature),
-        ["ram"] = ("Memory usage", SensorType.Load),
+        ["cputemp"] = ("CPU temperature", SensorType.Temperature, "°C"),
+        ["gputemp"] = ("GPU temperature", SensorType.Temperature, "°C"),
+        ["ram"] = ("Memory usage", SensorType.Load, "%"),
+        ["diskhealth"] = ("Drive health (any drive)", SensorType.Factor, "health"),
+        ["ping"] = ("Ping latency", SensorType.Factor, "ms"),
+        ["pingloss"] = ("Ping loss", SensorType.Level, "%"),
     };
 
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -55,7 +59,7 @@ public sealed class AlertRule
     /// reading hovering around the limit doesn't restart the timer or flap.
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore]
-    public float Margin => Type switch
+    public float Margin => Series == "diskhealth" ? 0.5f : Type switch
     {
         SensorType.Temperature => 3,
         SensorType.Load or SensorType.Level or SensorType.Control or SensorType.Humidity => 3,
@@ -72,6 +76,9 @@ public sealed class AlertRule
         "cputemp" => snap.Summary.CpuTemp,
         "gputemp" => snap.Summary.Gpu?.Temp,
         "ram" => snap.Summary.RamLoad,
+        "diskhealth" => snap.Summary.WorstDriveHealth is var h && h != HealthLevel.Unknown ? (float)h : null,
+        "ping" => snap.Summary.Ping?.AvgMs,
+        "pingloss" => snap.Summary.Ping is { Samples: > 0 } p ? p.LossPercent : null,
         _ => Sensor is { } key ? snap.FindSensor(key)?.Sensor.Value : null,
     };
 }

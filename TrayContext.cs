@@ -111,6 +111,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             catch (InvalidOperationException) { }
         };
         ApplyHistory(seed: true);
+        ApplyLatency();
         // Alerts are judged on the poll thread (cheap); their actions run on the UI thread.
         _hw.AddConsumer(new SnapshotConsumer(snap =>
         {
@@ -202,6 +203,23 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         return _longRangeSeconds == seconds ? _longRange : null;
     }
 
+    // ---- Ping ---------------------------------------------------------------------------------
+
+    LatencyMonitor? _latency;
+    string? _latencyHost;
+
+    /// <summary>Starts, restarts (new host) or stops the opt-in ping to match the settings.</summary>
+    void ApplyLatency()
+    {
+        var host = _settings.PingEnabled ? _settings.PingHost.Trim() : null;
+        if (host == _latencyHost && (_latency != null) == _settings.PingEnabled) return;
+        _hw.Latency = null;
+        _latency?.Dispose();
+        _latency = _settings.PingEnabled ? new LatencyMonitor(host) : null;
+        _latencyHost = host;
+        _hw.Latency = _latency;
+    }
+
     public long HistorySizeBytes => _archive?.SizeBytes() ?? 0;
 
     public Task DeleteHistoryAsync()
@@ -241,7 +259,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     public void TestAlert(AlertRule rule)
     {
         var snap = _hw.Latest;
-        var value = snap != null && rule.ValueIn(snap) is { } v ? AlertText.Value(rule.Type, v) : "not available";
+        var value = snap != null && rule.ValueIn(snap) is { } v ? AlertText.Value(rule, v) : "not available";
         RunAlertActions(rule, AlertText.Target(rule, snap, _settings), $"Test: now {value}; alerts when {AlertText.Condition(rule)}.", DateTime.Now, snap);
         _settingsForm?.AlertsChanged();
     }
@@ -332,7 +350,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         foreach (var e in events)
         {
             var name = AlertText.Target(e.Rule, snap, _settings);
-            var value = AlertText.Value(e.Rule.Type, e.Value);
+            var value = AlertText.Value(e.Rule, e.Value);
             if (!e.Fired)
             {
                 _alertLog.Add(new AlertLog.Entry(e.Time, e.Rule.Id, name, $"Back to {value}"));
@@ -477,6 +495,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     {
         ApplyToService();
         ApplyHistory();
+        ApplyLatency();
         _hw.Poke();
         Fmt.Fahrenheit = _settings.Fahrenheit;
         ApplyHotkey();
@@ -841,6 +860,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         _widget.Dispose();
         _hw.Dispose();
         _recorder?.Dispose();
+        _latency?.Dispose();
         if (!_dash.IsDisposed) _dash.Close();
         _dash.Dispose();
         ExitThread();

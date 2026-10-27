@@ -60,7 +60,7 @@ static class Vitals
     public static ItemView? ForItem(WidgetItem item, Snapshot snap, AppSettings settings) =>
         item.Kind == WidgetKind.Sensor
             ? item.Sensor is { } key ? ForSensor(snap, key, item.Label, settings) : null
-            : Build(item.Kind, item.Label, snap);
+            : Build(item.Kind, item.Label, snap, settings.NetShowsWifi);
 
     /// <summary>
     /// One sensor as a taskbar item / hover card: its value, session min and max, and history when
@@ -126,7 +126,8 @@ static class Vitals
         _ => "hw:" + hw.Id,
     };
 
-    public static ItemView? Build(WidgetKind kind, string? label, Snapshot snap)
+    /// <param name="wifiSignal">Network item: show the Wi-Fi signal as its main value (when connected by Wi-Fi).</param>
+    public static ItemView? Build(WidgetKind kind, string? label, Snapshot snap, bool wifiSignal = false)
     {
         var s = snap.Summary;
         float[]? H(string key) => snap.History.TryGetValue(key, out var h) ? h : null;
@@ -187,11 +188,12 @@ static class Vitals
             case WidgetKind.Network:
             {
                 if (s.NetDown == null) return null;
+                bool showWifi = wifiSignal && s.Wifi != null;
                 var v = new ItemView
                 {
                     Kind = kind, Title = "Network", Accent = Theme.Net, Label = label,
-                    Device = s.NetAdapter ?? "Network", DeviceShort = s.NetAdapter,
-                    Primary = null, PrimaryTemplates = Array.Empty<string>(),
+                    Device = s.Wifi is { } w ? $"{s.NetAdapter ?? "Network"} · {w.Ssid}" : s.NetAdapter ?? "Network", DeviceShort = s.NetAdapter,
+                    Primary = showWifi ? $"{s.Wifi!.SignalPercent}%" : null, PrimaryTemplates = showWifi ? new[] { "100%" } : Array.Empty<string>(),
                     Line1 = "↑ " + Fmt.Rate(s.NetUp ?? 0), Line2 = "↓ " + Fmt.Rate(s.NetDown ?? 0),
                     LineTemplates = new[] { "↓ 999.9 KB/s" },
                     History = H("net"), HistoryCaption = "Throughput · last 90 seconds",
@@ -202,6 +204,18 @@ static class Vitals
                 var adapter = snap.Hardware.FirstOrDefault(h => h.Type == HardwareType.Network && h.Name == s.NetAdapter);
                 if (adapter?.Value(SensorType.Data, "Data Downloaded") is { } dl) v.Rows.Add(new("Downloaded this session", $"{dl:0.0} GB"));
                 if (adapter?.Value(SensorType.Data, "Data Uploaded") is { } ul) v.Rows.Add(new("Uploaded this session", $"{ul:0.0} GB"));
+                if (s.Wifi is { } wifi)
+                {
+                    v.Rows.Add(new("Wi-Fi network", wifi.Ssid.Length > 0 ? wifi.Ssid : "(hidden)"));
+                    v.Rows.Add(new("Wi-Fi signal", $"{wifi.SignalPercent}%", wifi.SignalPercent < 30 ? Theme.Warn : null));
+                    v.Rows.Add(new("Wi-Fi link speed", wifi.RxMbps == wifi.TxMbps ? $"{wifi.RxMbps} Mbps" : $"↓ {wifi.RxMbps}  ↑ {wifi.TxMbps} Mbps"));
+                }
+                if (s.Ping is { } ping)
+                {
+                    v.Rows.Add(new($"Ping · {s.PingTarget}", ping.AvgMs is { } ms ? $"{ms:0} ms" : "no reply", ping.AvgMs == null ? Theme.Warn : null));
+                    if (ping.JitterMs is { } jitter) v.Rows.Add(new("Jitter", $"{jitter:0.0} ms"));
+                    v.Rows.Add(new("Packet loss (last minute)", $"{ping.LossPercent:0}%", ping.LossPercent > 0 ? Theme.Warn : null));
+                }
                 return v;
             }
 
@@ -268,7 +282,12 @@ static class Vitals
                     TileSub = $"R {Fmt.Rate(read)}  ·  W {Fmt.Rate(write)}",
                 };
                 foreach (var d in s.Disks)
-                    v.Rows.Add(new(d.Name, $"{Fmt.Temp(d.Temp)}  ·  {Fmt.Num(d.UsedPct)}% full", Theme.TempColor(d.Temp)));
+                {
+                    var name = d.Volumes.Count > 0 ? $"{d.Name} ({d.Letters})" : d.Name;
+                    var health = d.Health.Level is HealthLevel.Caution or HealthLevel.Bad ? $"  ·  {d.Health.Word}" : "";
+                    v.Rows.Add(new(name, $"{Fmt.Temp(d.Temp)}  ·  {Fmt.Num(d.UsedPct)}% full{health}",
+                                   d.Health.Level is HealthLevel.Caution or HealthLevel.Bad ? HealthColor(d.Health.Level) : Theme.TempColor(d.Temp)));
+                }
                 v.Rows.Add(new("Read", Fmt.Rate(read)));
                 v.Rows.Add(new("Write", Fmt.Rate(write)));
                 return v;
@@ -319,8 +338,11 @@ static class Vitals
             History = snap.History.TryGetValue("disk:" + d.Id, out var h) ? h : null, HistoryMax = 100,
             TileSub = $"{Fmt.Num(d.UsedPct)}% full",
         };
+        if (d.Health.Level != HealthLevel.Unknown) v.Rows.Add(new("Health", d.Health.Word, HealthColor(d.Health.Level)));
         v.Rows.Add(new("Temperature", Deg1(d.Temp), Theme.TempColor(d.Temp)));
         if (d.UsedPct is { } used) v.Rows.Add(new("Space used", $"{used:0.0}%"));
+        foreach (var vol in d.Volumes)
+            v.Rows.Add(new($"{vol.Letter}: free", $"{Bytes(vol.FreeBytes)} of {Bytes(vol.TotalBytes)} ({vol.FreePercent:0}%)", vol.FreePercent < 10 ? Theme.Warn : null));
         v.Rows.Add(new("Read", Fmt.Rate(d.ReadRate ?? 0)));
         v.Rows.Add(new("Write", Fmt.Rate(d.WriteRate ?? 0)));
         if (hw?.Value(SensorType.Load, "Total Activity") is { } act) v.Rows.Add(new("Active time", $"{act:0}%"));
@@ -383,6 +405,17 @@ static class Vitals
         var cap = dimms[0].Value(SensorType.Data, "Capacity");
         return $"{dimms.Count} × {name}{(cap is { } c ? $" ({c:0} GB)" : "")}";
     }
+
+    public static Color HealthColor(HealthLevel level) => level switch
+    {
+        HealthLevel.Good => Theme.Good,
+        HealthLevel.Caution => Theme.Warn,
+        HealthLevel.Bad => Theme.Hot,
+        _ => Theme.TextDim,
+    };
+
+    /// <summary>Volume sizes the way File Explorer shows them (1024-based, so a 1 TB drive is "931 GB").</summary>
+    static string Bytes(ulong b) => b >= 1UL << 40 ? $"{b / (double)(1UL << 40):0.00} TB" : b >= 1UL << 30 ? $"{b / (double)(1UL << 30):0} GB" : $"{b / (double)(1UL << 20):0} MB";
 
     public static string Pct(float? v) => v is { } x ? $"{x:0}%" : "--%";
     static string Pct1(float? v) => v is { } x ? $"{x:0.0}%" : "—";

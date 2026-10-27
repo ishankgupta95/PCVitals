@@ -112,6 +112,14 @@ public sealed class AppSettings
     public bool HistoryEnabled { get; set; } = true;
     public int HistoryRetentionDays { get; set; } = 30;
 
+    // Network
+    /// <summary>Show Wi-Fi signal strength as the NET item's main value.</summary>
+    public bool NetShowsWifi { get; set; }
+    /// <summary>Ping a host every 5 s (off by default: it is the only feature that sends network traffic).</summary>
+    public bool PingEnabled { get; set; }
+    /// <summary>Host to ping; empty for the default gateway (router).</summary>
+    public string PingHost { get; set; } = "";
+
     // Alerts
     public List<AlertRule> AlertRules { get; set; } = DefaultAlertRules();
 

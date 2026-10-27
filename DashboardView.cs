@@ -218,8 +218,12 @@ sealed class DashboardView : Control
             var page = new Page
             {
                 Key = "disk:" + d.Id, Name = "Drive", Glyph = "", Accent = Theme.Storage, View = Vitals.ForDisk(d, snap),
-                Sub = d.Name, HeaderSub = d.UsedPct is { } u ? $"Storage · {u:0}% full" : "Storage",
-                RailValue = $"{Fmt.Temp(d.Temp)}{(d.UsedPct is { } used ? $" · {used:0}% full" : "")}",
+                Sub = d.Volumes.Count > 0 ? $"{d.Letters}  {d.Name}" : d.Name,
+                HeaderSub = string.Join(" · ", new[] { "Storage", d.Volumes.Count > 0 ? d.Letters : null, d.UsedPct is { } u ? $"{u:0}% full" : null,
+                                                       d.Health.Level != HealthLevel.Unknown ? $"health: {d.Health.Word}" : null }.Where(x => x != null)),
+                RailValue = d.Health.Level is HealthLevel.Caution or HealthLevel.Bad
+                    ? $"{d.Health.Word} · {Fmt.Temp(d.Temp)}"
+                    : $"{Fmt.Temp(d.Temp)}{(d.UsedPct is { } used ? $" · {used:0}% full" : "")}",
                 MainSeries = "diskio:" + d.Id, MainLabel = "Read + write", MainFormat = v => Fmt.Rate(v),
                 SecondSeries = "disk:" + d.Id, SecondLabel = "Temperature", SecondIsTemp = true,
             };
@@ -592,6 +596,9 @@ sealed class DashboardView : Control
 
         if (page.MainSeries != null) y = DrawGraphCard(g, page, x, y, w) + S(14);
         if (page.View != null) y = DrawStatGrid(g, page, x, y, w) + S(14);
+        if (page.Key.StartsWith("disk:", StringComparison.Ordinal) && _snap!.Summary.Disks.FirstOrDefault(d => "disk:" + d.Id == page.Key) is { } disk
+            && disk.Health.Level != HealthLevel.Unknown)
+            y = DrawHealthCard(g, disk.Health, x, y, w) + S(14);
 
         if (page.Key == "cpu")
         {
@@ -903,6 +910,26 @@ sealed class DashboardView : Control
         }
         int lines = (rows.Count + cols - 1) / cols;
         return y + lines * tileH + (lines - 1) * gap;
+    }
+
+    /// <summary>The drive's health verdict and, in plain words, why.</summary>
+    int DrawHealthCard(Graphics g, DriveHealth health, int x, int y, int w)
+    {
+        var notes = health.Notes.Count > 0 ? health.Notes
+            : new[] { "No warning signs in the drive's SMART data." };
+        int lineH = S(22);
+        var card = new Rectangle(x, y, w, S(48) + notes.Count * lineH + S(10));
+        if (card.Bottom < _viewport.Top || card.Top > _viewport.Bottom) return card.Bottom;
+        Gfx.FillRounded(g, card, S(10), Theme.Surface);
+        Gfx.Text(g, "DRIVE HEALTH", _f.Label, Theme.TextFaint, new Rectangle(x + S(16), y + S(14), w, S(16)));
+        DrawPill(g, health.Word.ToUpperInvariant(), Vitals.HealthColor(health.Level), x + S(16) + Gfx.TextWidth(g, "DRIVE HEALTH", _f.Label) + S(10), y + S(13), S(18), filled: true);
+        int ly = y + S(42);
+        foreach (var note in notes)
+        {
+            Gfx.Text(g, "•  " + note, _f.Body, Theme.TextDim, new Rectangle(x + S(16), ly, w - S(32), lineH), TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            ly += lineH;
+        }
+        return card.Bottom;
     }
 
     int DrawThreadBars(Graphics g, List<SensorReading> threads, Color color, int x, int y, int w)

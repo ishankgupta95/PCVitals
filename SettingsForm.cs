@@ -564,7 +564,7 @@ sealed class SettingsForm : Form
         {
             var name = AlertText.Target(rule, snap, _s);
             var last = _host.LastFired(rule.Id) is { } t ? $" · went off at {t:HH:mm}" : "";
-            var now = snap != null && rule.ValueIn(snap) is { } v ? $" · now {AlertText.Value(rule.Type, v)}" : "";
+            var now = snap != null && rule.ValueIn(snap) is { } v ? $" · now {AlertText.Value(rule, v)}" : "";
             var edit = new PillButton("Edit…", () => EditAlert(rule)) { AccessibleName = $"Edit the {name} alert" };
             var test = new PillButton("Test", () => _host.TestAlert(rule)) { AccessibleName = $"Test the {name} alert" };
             var remove = new PillButton("", () => RemoveAlert(rule), 34) { Glyph = "", AccessibleName = $"Remove the {name} alert" };
@@ -670,6 +670,19 @@ sealed class SettingsForm : Form
                                 Combo(hotkeys, Math.Max(0, Array.IndexOf(hotkeys, _s.Hotkey)), 190, i => _s.Hotkey = hotkeys[i]), ""));
         p.Controls.Add(new Card("Show advanced sensors in the dashboard", "Per-engine GPU load, power connector pins, memory timings and sensor limits.",
                                 Toggle(_s.ShowAdvancedSensors, v => _s.ShowAdvancedSensors = v), ""));
+
+        p.Controls.Add(Section("Network"));
+        p.Controls.Add(new Card("Wi-Fi signal on the taskbar", "Shows the Wi-Fi signal strength as the NET item's main value while you're on Wi-Fi. The network name, signal and link speed are always on the dashboard's Network page.",
+                                Toggle(_s.NetShowsWifi, v => _s.NetShowsWifi = v), ""));
+        var host = new InputBox(_s.PingHost, "Router (default gateway)", 200, 253) { FieldName = "Host to ping" };
+        host.TextChanged += (_, _) =>
+        {
+            _s.PingHost = host.Value.Trim();
+            Changed();
+        };
+        p.Controls.Add(new Card("Measure latency (ping)",
+                                "Off by default: it's the only thing PC Vitals sends over the network. Pings once every 5 seconds and shows the average, jitter and loss on the Network page (and can raise alerts). Leave the host empty to ping your router, so nothing leaves your local network.",
+                                new AccessoryRow(host, Toggle(_s.PingEnabled, v => _s.PingEnabled = v)), ""));
 
         p.Controls.Add(Section("History"));
         p.Controls.Add(new Card("Save history", "Keeps one-minute readings on this PC (about 1–2 MB a day, never sent anywhere) for the 7- and 30-day graphs and exports. The 1 hour and 24 hour graphs also continue across restarts.",

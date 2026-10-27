@@ -6,8 +6,9 @@ namespace PCVitals;
 /// <summary>Add or edit one alert rule: what to watch, when it counts, and what to do.</summary>
 sealed class AlertEditor : Form
 {
-    static readonly string[] TargetNames = { "CPU temperature", "GPU temperature", "Memory usage", "A sensor…" };
-    static readonly string[] TargetSeries = { "cputemp", "gputemp", "ram" };
+    static readonly string[] TargetSeries = AlertRule.SeriesTargets.Keys.ToArray();
+    static readonly string[] TargetNames = AlertRule.SeriesTargets.Values.Select(t => t.Name).Append("A sensor…").ToArray();
+    static int SensorIndex => TargetSeries.Length;
     static readonly int[] Durations = { 5, 15, 30, 60, 120, 300, 600 };
     static readonly int[] Cooldowns = { 1, 5, 15, 30, 60, 240 };
 
@@ -47,7 +48,7 @@ sealed class AlertEditor : Form
         ClientSize = new Size(600, 600);
         KeyPreview = true;
 
-        int targetIndex = rule.Sensor != null ? 3 : Math.Max(0, Array.IndexOf(TargetSeries, rule.Series));
+        int targetIndex = rule.Sensor != null ? SensorIndex : Math.Max(0, Array.IndexOf(TargetSeries, rule.Series));
         _target = new Dropdown(TargetNames, targetIndex, 200) { AccessibleName = "Watch" };
         var choose = new PillButton("Choose sensor…", ChooseSensor, 140);
         _sensorName = new Label { AutoSize = false, Size = new Size(380, 22), ForeColor = Theme.TextDim, Tag = "dim" };
@@ -114,7 +115,7 @@ sealed class AlertEditor : Form
 
         _target.SelectedIndexChanged += (_, _) =>
         {
-            if (_target.SelectedIndex == 3 && _sensor == null) ChooseSensor();
+            if (_target.SelectedIndex == SensorIndex && _sensor == null) ChooseSensor();
             UpdateTarget(resetThreshold: true);
         };
         _sound.SelectedIndexChanged += (_, _) => PickSound();
@@ -126,19 +127,22 @@ sealed class AlertEditor : Form
 
     static int Nearest(int[] values, int value) => Array.IndexOf(values, values.OrderBy(v => Math.Abs(v - value)).First());
 
-    SensorType CurrentType => _target.SelectedIndex == 3 ? _sensor?.SensorType ?? SensorType.Factor
+    SensorType CurrentType => _target.SelectedIndex == SensorIndex ? _sensor?.SensorType ?? SensorType.Factor
         : AlertRule.SeriesTargets[TargetSeries[_target.SelectedIndex]].Type;
 
     void UpdateTarget(bool resetThreshold)
     {
         var type = CurrentType;
-        _unit.Text = type == SensorType.Temperature ? Fmt.TempUnit : SensorCatalog.UnitOf(type);
-        var probe = new AlertRule { Sensor = _target.SelectedIndex == 3 ? _sensor : null, Series = _target.SelectedIndex < 3 ? TargetSeries[_target.SelectedIndex] : null };
-        _sensorName.Text = _target.SelectedIndex == 3
+        var probe = new AlertRule { Sensor = _target.SelectedIndex == SensorIndex ? _sensor : null, Series = _target.SelectedIndex < SensorIndex ? TargetSeries[_target.SelectedIndex] : null };
+        var seriesUnit = probe.Series != null ? AlertRule.SeriesTargets[probe.Series].Unit : null;
+        _unit.Text = type == SensorType.Temperature ? Fmt.TempUnit
+            : seriesUnit == "health" ? "(1 = Good, 2 = Caution, 3 = Bad)"
+            : seriesUnit ?? SensorCatalog.UnitOf(type);
+        _sensorName.Text = _target.SelectedIndex == SensorIndex
             ? _sensor == null ? "No sensor chosen yet." : AlertText.Target(probe, _latest(), _settings)
             : "";
         float? threshold = resetThreshold
-            ? (_latest() is { } snap ? probe.ValueIn(snap) : null) switch
+            ? seriesUnit == "health" ? 1 : (_latest() is { } snap ? probe.ValueIn(snap) : null) switch
             {
                 // Start a little above what it reads now, so a fresh rule doesn't go off straight away.
                 { } now when type == SensorType.Temperature => MathF.Round(now + 10),
@@ -162,7 +166,7 @@ sealed class AlertEditor : Form
         if (entry != null) _sensor = entry.Key;
         if (_sensor == null) _target.SelectedIndex = 0;
         UpdateTarget(resetThreshold: entry != null);
-        if (entry != null && _target.SelectedIndex != 3) _target.SelectedIndex = 3;
+        if (entry != null && _target.SelectedIndex != SensorIndex) _target.SelectedIndex = SensorIndex;
     }
 
     void PickSound()
@@ -190,7 +194,7 @@ sealed class AlertEditor : Form
     {
         _error.Text = "";
         var r = _rule.Clone();
-        if (_target.SelectedIndex == 3)
+        if (_target.SelectedIndex == SensorIndex)
         {
             if (_sensor == null)
             {

@@ -30,6 +30,10 @@ public sealed class DiskSummary
     public float? UsedPct { get; init; }
     public float? ReadRate { get; init; }
     public float? WriteRate { get; init; }
+    public IReadOnlyList<VolumeInfo> Volumes { get; init; } = Array.Empty<VolumeInfo>();
+    public DriveHealth Health { get; init; } = DriveHealth.Unknown;
+    /// <summary>"C:, D:"</summary>
+    public string Letters => string.Join(", ", Volumes.Select(v => v.Letter + ":"));
 }
 
 public sealed class BatterySummary
@@ -87,6 +91,15 @@ public sealed class Summary
     public IReadOnlyList<DiskSummary> Disks { get; init; } = Array.Empty<DiskSummary>();
 
     public BatterySummary? Battery { get; init; }
+
+    /// <summary>The connected Wi-Fi network, if any.</summary>
+    public WifiStatus? Wifi { get; init; }
+    /// <summary>Latency to the router or chosen host; null unless the user turned ping on.</summary>
+    public PingStats? Ping { get; init; }
+    public string? PingTarget { get; init; }
+
+    /// <summary>The worst health verdict of any drive (Unknown when none could be read).</summary>
+    public HealthLevel WorstDriveHealth => Disks.Select(d => d.Health.Level).DefaultIfEmpty(HealthLevel.Unknown).Max();
 
     /// <summary>
     /// The sensor each headline history series was read from, by alias (e.g. "cpu" → "/amdcpu/0/load/0").

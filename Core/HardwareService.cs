@@ -290,6 +290,7 @@ public sealed class HardwareService : IDisposable
         RunCommands();
         UpdateHardware();
 
+        ReadWifi();
         var all = new List<HardwareReading>();
         foreach (var hw in _computer.Hardware) Collect(hw, all);
 
@@ -298,7 +299,8 @@ public sealed class HardwareService : IDisposable
         if (_nvmlBlocked && _tick == 1 && all.Any(h => h.Type == HardwareType.GpuNvidia && h.Find(SensorType.Load, "GPU Power") == null))
             LoadNvml("GPU reports no power percentage");
 
-        var summary = Summarize(all, PreferredGpuId);
+        var latency = Latency;
+        var summary = Summarize(all, PreferredGpuId, _drives, _wifi.FirstOrDefault(), latency?.Stats, latency?.Target);
         _primaryGpuId = summary.Gpu?.Id;
 
         var display = all
@@ -335,6 +337,12 @@ public sealed class HardwareService : IDisposable
             Push("gpu:" + g.Id, g.Load);
             Push("gputemp:" + g.Id, g.Temp);
             Push("gpupower:" + g.Id, g.Power);
+        }
+        if (summary.Ping is { } ping)
+        {
+            Push("ping", ping.AvgMs);
+            Push("pingjitter", ping.JitterMs);
+            Push("pingloss", ping.LossPercent);
         }
         RecordTracked(all, summary);
 
@@ -375,6 +383,44 @@ public sealed class HardwareService : IDisposable
                 if (_tick % ticks != 0) continue;
             }
             UpdateDevice(hw, DetailedMode);
+            if (hw.HardwareType == HardwareType.Storage) ReadDriveDetails(hw);
+        }
+    }
+
+    /// <summary>Volumes and health per drive id, refreshed whenever the drive itself is read (poll thread only).</summary>
+    readonly Dictionary<string, DriveDetails> _drives = new();
+
+    List<WifiStatus> _wifi = new();
+    long _wifiTick = long.MinValue / 2;
+
+    /// <summary>Opt-in ping (set by the app when the user turns it on).</summary>
+    public LatencyMonitor? Latency { get; set; }
+
+    /// <summary>Wi-Fi status every 5 s (every poll while the dashboard is open): a local query, no network traffic.</summary>
+    void ReadWifi()
+    {
+        if (!DetailedMode && _tick - _wifiTick < Math.Max(1, 5000 / Math.Max(1, IntervalMs))) return;
+        _wifiTick = _tick;
+        try
+        {
+            _wifi = Wlan.Query();
+        }
+        catch (Exception ex)
+        {
+            LogOnce("wifi:" + ex.GetType().Name, "Couldn't read Wi-Fi status: " + ex.Message);
+            _wifi = new();
+        }
+    }
+
+    void ReadDriveDetails(IHardware hw)
+    {
+        try
+        {
+            _drives[IdOf(hw)] = DriveDetails.Read(hw);
+        }
+        catch (Exception ex)
+        {
+            LogOnce("drive-details:" + ex.GetType().Name, $"Couldn't read volumes or health of {hw.Name}: {ex.Message}");
         }
     }
 
@@ -607,6 +653,12 @@ public sealed class HardwareService : IDisposable
         var reading = new HardwareReading(IdOf(hw), hw.Name, hw.HardwareType, sensors);
         top ??= reading.Id;
         _topOf.TryAdd(reading.Id, top);
+        // Free space per lettered volume, as readings of their own (pin, alert and history like any sensor).
+        if (hw.HardwareType == HardwareType.Storage && _drives.TryGetValue(reading.Id, out var drive))
+            foreach (var v in drive.Volumes)
+                sensors.Add(Synthetic(reading.Id, $"level/free-{char.ToLowerInvariant(v.Letter)}", $"{v.Letter}: free space", SensorType.Level, v.FreePercent));
+        if (hw.HardwareType == HardwareType.Network && _wifi.FirstOrDefault(w => w.Matches(reading.Id)) is { } wifi)
+            sensors.Add(Synthetic(reading.Id, "level/wifi-signal", "Wi-Fi signal", SensorType.Level, wifi.SignalPercent));
         if (hw.HardwareType == HardwareType.GpuNvidia)
         {
             if (_nvmlFeed.TryGet(hw.Name, out var feed))
@@ -770,7 +822,8 @@ public sealed class HardwareService : IDisposable
         FanPct = g.Value(SensorType.Control, "GPU Fan"),
     };
 
-    static Summary Summarize(IReadOnlyList<HardwareReading> all, string? preferredGpu)
+    static Summary Summarize(IReadOnlyList<HardwareReading> all, string? preferredGpu, IReadOnlyDictionary<string, DriveDetails> drives,
+                             WifiStatus? wifi = null, PingStats? ping = null, string? pingTarget = null)
     {
         var cpu = all.FirstOrDefault(h => h.Type == HardwareType.Cpu);
         var memories = all.Where(h => h.Type == HardwareType.Memory).ToList();
@@ -836,6 +889,8 @@ public sealed class HardwareService : IDisposable
             UsedPct = d.Value(SensorType.Load, "Used Space"),
             ReadRate = d.Value(SensorType.Throughput, "Read Rate"),
             WriteRate = d.Value(SensorType.Throughput, "Write Rate"),
+            Volumes = drives.GetValueOrDefault(d.Id)?.Volumes ?? Array.Empty<VolumeInfo>(),
+            Health = drives.GetValueOrDefault(d.Id)?.Health ?? DriveHealth.Unknown,
         }).ToList();
 
         return new Summary
@@ -877,6 +932,9 @@ public sealed class HardwareService : IDisposable
             Disks = disks,
             Battery = battery,
             Sources = sources,
+            Wifi = wifi,
+            Ping = ping,
+            PingTarget = pingTarget,
         };
     }
 

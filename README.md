@@ -45,6 +45,12 @@ for a dashboard of every sensor in your machine.
   1-minute, 5-minute or hourly resolution. Turn it off or delete it in Settings → General.
 - **Stat tiles** per device: clocks, power vs. limit, hot spot / memory junction, VRAM, fan state, drive wear and
   lifetime writes, DIMM temperatures, battery wear and capacity, process/thread/handle counts and more.
+- **Drive health and space**: each drive shows its letters (C:, D:) and free space per volume, and a
+  Good / Caution / Bad health verdict from its SMART data (spare blocks, wear, reallocated, pending and unreadable
+  sectors, integrity errors), with the reasons in plain words. Free space per volume can be pinned, graphed and
+  alerted on like any sensor, and "drive health" is an alert preset.
+- **Wi-Fi and latency**: the Network page shows the Wi-Fi network, signal and link speed (optionally the signal on
+  the NET item), and, if you turn it on, ping latency, jitter and loss to your router or a host you choose.
 - **Top processes** by CPU, memory or GPU (grouped by app, with a per-app GPU column), and a per-thread CPU load
   graph.
 - **Keyboard and screen reader friendly**: Tab / Shift+Tab move through everything clickable, Enter activates,
@@ -75,7 +81,8 @@ Sidebar navigation and setting cards, with a live preview of the taskbar strip a
 - **Primary GPU** choice on multi-GPU systems, with discrete/integrated labels.
 - **Start with Windows** without a UAC prompt at each sign-in (a scheduled task with highest privileges).
 
-No network access, no telemetry. Settings live in `%APPDATA%\PCVitals\settings.json`, saved history in
+No network access unless you turn on ping (Settings → General; off by default, and it pings your router unless
+you name another host). No telemetry. Settings live in `%APPDATA%\PCVitals\settings.json`, saved history in
 `%LOCALAPPDATA%\PCVitals\history` (one file per day; it never leaves your PC).
 
 ## Requirements
@@ -196,6 +203,7 @@ Found a bug? Please [open an issue](../../issues/new/choose) and attach the sens
 | `Core/HistoryArchive.cs` / `Core/HistoryRecorder.cs` | Saved history: day files, series map, loading, clean-up, and the background writer |
 | `Core/HistoryCsv.cs` / `Core/HeadlineSeries.cs` | CSV export of saved history, and names for the headline series |
 | `Core/Alerts.cs` | Alert rules, the engine that decides when they go off, and the alert history |
+| `Core/Drives.cs` / `Core/Network.cs` | Drive volumes and health rules; Wi-Fi status and the opt-in ping |
 | `Core/NvmlFeed.cs` | Helper process that streams NVML readings while the dashboard is open |
 | `ProcessStats.cs` / `GpuProcessUsage.cs` | Top processes by CPU, memory and GPU |
 | `Vitals.cs` | Turns a snapshot into display items (labels, values, detail rows) shared by every view |

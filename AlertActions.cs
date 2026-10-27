@@ -25,11 +25,20 @@ static class AlertText
         _ => SensorFormat.Short(type, value),
     };
 
+    /// <summary>A value of what the rule watches, in its unit ("23 ms", "Caution").</summary>
+    public static string Value(AlertRule rule, float value) =>
+        rule.Series != null && AlertRule.SeriesTargets.TryGetValue(rule.Series, out var t) ? t.Unit switch
+        {
+            "ms" => $"{value:0} ms",
+            "health" => ((HealthLevel)(int)Math.Round(value)).ToString(),
+            _ => Value(t.Type, value),
+        } : Value(rule.Type, value);
+
     public static string Duration(int seconds) => seconds < 60 ? $"{seconds} s" : seconds % 60 == 0 ? $"{seconds / 60} min" : $"{seconds / 60} min {seconds % 60} s";
 
     /// <summary>"above 90°C for 15 s"</summary>
     public static string Condition(AlertRule rule) =>
-        $"{(rule.Condition == AlertCondition.Above ? "above" : "below")} {Value(rule.Type, rule.Threshold)} for {Duration(rule.DurationSeconds)}";
+        $"{(rule.Condition == AlertCondition.Above ? "above" : "below")} {Value(rule, rule.Threshold)} for {Duration(rule.DurationSeconds)}";
 
     /// <summary>"Notification, sound, runs backup.cmd"</summary>
     public static string Actions(AlertRule rule)
@@ -49,6 +58,8 @@ static class AlertText
         "cputemp" => "cpu",
         "gputemp" => snap?.Summary.Gpu is { } g ? "gpu:" + g.Id : null,
         "ram" => "memory",
+        "ping" or "pingloss" => "network",
+        "diskhealth" => snap?.Summary.Disks.OrderByDescending(d => d.Health.Level).FirstOrDefault() is { } d ? "disk:" + d.Id : null,
         _ => rule.Sensor is { } key && snap?.FindSensor(key) is { } e ? Vitals.PageFor(e.Hardware) : null,
     };
 }

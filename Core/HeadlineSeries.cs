@@ -17,6 +17,9 @@ public static class HeadlineSeries
         ["battery"] = ("Battery charge", "%"),
         ["batteryrate"] = ("Battery charge rate", "W"),
         ["disk"] = ("Hottest drive temperature", "°C"),
+        ["ping"] = ("Ping latency", "ms"),
+        ["pingjitter"] = ("Ping jitter", "ms"),
+        ["pingloss"] = ("Ping loss", "%"),
     };
 
     /// <summary>The headline series, in the order exports list them (per-device ones for the devices in <paramref name="summary"/>).</summary>
@@ -28,6 +31,7 @@ public static class HeadlineSeries
         foreach (var d in summary?.Disks ?? Array.Empty<DiskSummary>())
             keys.Add("disk:" + d.Id);
         if (summary?.Battery != null) keys.Add("battery");
+        if (summary?.Ping != null) keys.AddRange(new[] { "ping", "pingjitter", "pingloss" });
         return keys;
     }
 
