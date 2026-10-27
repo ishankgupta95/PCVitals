@@ -20,6 +20,7 @@ sealed class TaskbarWidget : Form
     List<ItemView> _views = new();
     List<Rectangle> _rects = new();
     TaskbarInfo? _taskbar;
+    bool _taskbarMissing;
     IntPtr _owner;
     Point _pos;
     int _hover = -1;
@@ -81,6 +82,11 @@ sealed class TaskbarWidget : Form
             return;
         }
         var tb = _locate();
+        // Explorer hides the taskbar for a moment every few seconds (seen with auto-hide on), so
+        // keep the strip up until a later check still finds it gone.
+        bool blip = tb == null && Visible && !_taskbarMissing;
+        _taskbarMissing = tb == null;
+        if (blip) return;
         if (tb == null || !tb.Horizontal || Native.FullscreenAppActive(tb.Handle))
         {
             HideAll();
