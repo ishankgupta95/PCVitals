@@ -401,8 +401,21 @@ sealed class TaskbarWidget : Form
     {
         if (!_cardWanted || _taskbar == null || _hover < 0 || _hover >= _views.Count || _hover >= _rects.Count) return;
         var r = _rects[_hover];
-        _card.ShowFor(_views[_hover], new Rectangle(_pos.X + r.X, _pos.Y + r.Y, r.Width, r.Height), _taskbar);
+        // The how-to hint is for the first few cards only; after that it's just noise.
+        if (!_card.Visible)
+        {
+            _cardHint = _settings.HoverCardsShown < HintedCards;
+            if (_cardHint)
+            {
+                _settings.HoverCardsShown++;
+                _settings.Save();
+            }
+        }
+        _card.ShowFor(_views[_hover], new Rectangle(_pos.X + r.X, _pos.Y + r.Y, r.Width, r.Height), _taskbar, _cardHint);
     }
+
+    const int HintedCards = 5;
+    bool _cardHint;
 
     void HideCard()
     {

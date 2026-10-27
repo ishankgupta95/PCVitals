@@ -98,6 +98,8 @@ public sealed class AppSettings
     public bool PawnIoNoticeShown { get; set; }
     /// <summary>The battery item was switched on automatically the first time a battery was seen.</summary>
     public bool BatteryItemAutoEnabled { get; set; }
+    /// <summary>How many times a hover card has opened; its "click / drag / right-click" hint stops after a few.</summary>
+    public int HoverCardsShown { get; set; }
     public ThemeMode ColorTheme { get; set; } = ThemeMode.System;
     /// <summary>Taskbar strip size in percent of normal (it may still shrink further to fit).</summary>
     public int WidgetScale { get; set; } = 100;

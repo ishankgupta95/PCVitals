@@ -6,6 +6,7 @@ namespace PCVitals;
 sealed class HoverCard : Form
 {
     ItemView? _view;
+    bool _hint = true;
     int _dpi = 96;
 
     public HoverCard()
@@ -38,11 +39,12 @@ sealed class HoverCard : Form
         Native.ApplyRoundedDarkFrame(Handle);
     }
 
-    public void ShowFor(ItemView view, Rectangle anchor, TaskbarInfo taskbar)
+    public void ShowFor(ItemView view, Rectangle anchor, TaskbarInfo taskbar, bool hint)
     {
         _view = view;
+        _hint = hint;
         _dpi = taskbar.Dpi;
-        var size = Measure(view, _dpi);
+        var size = Measure(view, _dpi, hint);
         int m = Scale(8, _dpi);
         var screen = Screen.FromRectangle(anchor).Bounds;
         int x = Math.Clamp(anchor.Left + anchor.Width / 2 - size.Width / 2, screen.Left + m, Math.Max(screen.Left + m, screen.Right - size.Width - m));
@@ -57,17 +59,17 @@ sealed class HoverCard : Form
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        if (_view != null) PaintCard(e.Graphics, _view, _dpi, ClientSize);
+        if (_view != null) PaintCard(e.Graphics, _view, _dpi, ClientSize, _hint);
     }
 
     static int Scale(float v, int dpi) => (int)Math.Round(v * dpi / 96f);
 
     const int Pad = 16, HeaderH = 20, DeviceH = 26, PrimaryH = 42, GraphH = 58, CaptionH = 24, RowH = 23, FooterH = 30;
 
-    public static Size Measure(ItemView v, int dpi) =>
-        new(Scale(340, dpi), Scale(Pad + HeaderH + DeviceH + PrimaryH + GraphH + CaptionH + 8 + v.Rows.Count * RowH + FooterH + Pad - 6, dpi));
+    public static Size Measure(ItemView v, int dpi, bool hint = true) =>
+        new(Scale(340, dpi), Scale(Pad + HeaderH + DeviceH + PrimaryH + GraphH + CaptionH + 8 + v.Rows.Count * RowH + (hint ? FooterH : 4) + Pad - 6, dpi));
 
-    public static void PaintCard(Graphics g, ItemView v, int dpi, Size size)
+    public static void PaintCard(Graphics g, ItemView v, int dpi, Size size, bool hint = true)
     {
         int S(float x) => Scale(x, dpi);
         var f = UiFonts.For(dpi);
@@ -107,10 +109,14 @@ sealed class HoverCard : Form
         Gfx.FillRounded(g, graph, S(8), Theme.Surface);
         var state = g.Save();
         using (var clip = Gfx.RoundedPath(graph, S(8))) g.SetClip(clip, CombineMode.Intersect);
-        Gfx.Sparkline(g, Rectangle.Inflate(graph, 0, -S(4)), v.History, v.HistoryMax, v.Accent, Math.Max(1.5f, S(1.6f)));
+        // Just after startup there's less than 90 seconds of history: spread it over the whole graph
+        // (rather than leaving the left side empty) and say what it covers.
+        bool starting = v.History is { Length: > 1 } h && h.Length < HardwareService.HistoryLength;
+        Gfx.Sparkline(g, Rectangle.Inflate(graph, 0, -S(4)), v.History, v.HistoryMax, v.Accent, Math.Max(1.5f, S(1.6f)), stretch: starting);
         g.Restore(state);
         y += S(GraphH);
-        Gfx.Text(g, v.HistoryCaption, f.Small, Theme.TextFaint, new Rectangle(x, y + S(4), w, S(18)));
+        var caption = starting ? v.HistoryCaption.Replace("last 90 seconds", "since PC Vitals started") : v.HistoryCaption;
+        Gfx.Text(g, caption, f.Small, Theme.TextFaint, new Rectangle(x, y + S(4), w, S(18)));
         y += S(CaptionH);
 
         using (var sep = new Pen(Theme.Border)) g.DrawLine(sep, x, y + S(4), x + w, y + S(4));
@@ -127,7 +133,8 @@ sealed class HoverCard : Form
             y += S(RowH);
         }
 
-        Gfx.Text(g, "Click for full details  ·  drag to move  ·  right-click for options", f.Small, Theme.TextFaint,
-                 new Rectangle(x, y + S(8), w, S(18)), TextFormatFlags.EndEllipsis);
+        if (hint)
+            Gfx.Text(g, "Click for full details  ·  drag to move  ·  right-click for options", f.Small, Theme.TextFaint,
+                     new Rectangle(x, y + S(8), w, S(18)), TextFormatFlags.EndEllipsis);
     }
 }
