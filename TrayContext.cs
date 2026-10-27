@@ -64,16 +64,24 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         };
         _dash.ResetMinMaxRequested += _hw.ResetMinMax;
         _dash.AddAlertRequested += AddAlertFor;
-        _dash.VisibleChanged += (_, _) =>
+        // Poll everything only while the dashboard is on screen; minimised or closed, go back to the lean polling.
+        void DashboardShownChanged()
         {
-            _hw.DetailedMode = _dash.Visible;
-            if (_dash.Visible) _hw.Poke();
+            if (_hw.DetailedMode == _dash.OnScreen) return;
+            _hw.DetailedMode = _dash.OnScreen;
+            if (_dash.OnScreen)
+            {
+                if (_hw.Latest is { } latest) _dash.SetSnapshot(latest);
+                _hw.Poke();
+            }
             else
             {
                 _longRange = null; // the 7 d / 30 d data is only kept while the dashboard is open
                 Native.TrimWorkingSet();
             }
-        };
+        }
+        _dash.VisibleChanged += (_, _) => DashboardShownChanged();
+        _dash.Resize += (_, _) => DashboardShownChanged();
 
         _menu = BuildMenu();
         _widget = new TaskbarWidget(settings, _menu) { LightTaskbar = _taskbarLight };
@@ -236,21 +244,12 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     /// <summary>"Add alert…" from a sensor in the dashboard: the rule editor, starting on that sensor.</summary>
     void AddAlertFor(SensorKey key)
     {
-        _dash.HoldOpen = true;
-        try
-        {
-            var rule = AlertEditor.Edit(_dash, new AlertRule { Sensor = key }, () => _hw.Latest, _settings, TestAlert);
-            if (rule == null) return;
-            _settings.AlertRules.Add(rule);
-            _settings.Save();
-            SettingsChanged();
-            _settingsForm?.AlertsChanged();
-        }
-        finally
-        {
-            _dash.HoldOpen = false;
-            if (_dash.Visible) _dash.Activate();
-        }
+        var rule = AlertEditor.Edit(_dash, new AlertRule { Sensor = key }, () => _hw.Latest, _settings, TestAlert);
+        if (rule == null) return;
+        _settings.AlertRules.Add(rule);
+        _settings.Save();
+        SettingsChanged();
+        _settingsForm?.AlertsChanged();
     }
 
     public AlertLog AlertLog => _alertLog;
@@ -325,7 +324,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         UpdateLogoTooltip(snap.Summary);
         _widget.SetSnapshot(snap);
         foreach (var extra in _extraWidgets.Values) extra.SetSnapshot(snap);
-        if (_dash.Visible) _dash.SetSnapshot(snap);
+        if (_dash.OnScreen) _dash.SetSnapshot(snap);
         _settingsForm?.SetSnapshot(snap);
 
         _snapshots++;
@@ -681,18 +680,19 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
 
     // ---- Dashboard / settings ---------------------------------------------------------------
 
+    /// <summary>
+    /// Taskbar item, tray icon or shortcut: bring the dashboard up on that page. If it is already the
+    /// window in front and showing that page, minimise it, so the same click toggles it like a
+    /// taskbar button.
+    /// </summary>
     void ToggleDashboard(WidgetKind? page, bool fromHotkey = false, string? pageKey = null)
     {
-        if (_dash.Visible)
+        bool switched = page != null && _dash.OnScreen && _dash.SwitchTo(page.Value, pageKey);
+        if (_dash.IsForeground && !switched)
         {
-            // Clicking a different taskbar item switches pages instead of closing.
-            if (page != null && _dash.SwitchTo(page.Value, pageKey)) return;
-            _dash.Hide();
+            _dash.WindowState = FormWindowState.Minimized;
             return;
         }
-        // The click that lands on a tray icon first deactivates (and hides) an open dashboard;
-        // don't immediately reopen it.
-        if (!fromHotkey && (DateTime.Now - _dash.LastAutoHidden).TotalMilliseconds < 300) return;
         ShowDashboard(page, fromHotkey, pageKey);
     }
 
@@ -702,12 +702,11 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         var anchor = Cursor.Position;
         if (nearTray && Screen.PrimaryScreen is { } screen)
             anchor = new Point(screen.WorkingArea.Right - 20, screen.WorkingArea.Bottom - 20);
-        _dash.ShowNear(anchor, page, pageKey);
+        _dash.ShowAndActivate(anchor, page, pageKey);
     }
 
     void OpenSettings(string? page = null, Rectangle? bounds = null)
     {
-        _dash.Hide();
         if (_settingsForm is { IsDisposed: false })
         {
             _settingsForm.Activate();

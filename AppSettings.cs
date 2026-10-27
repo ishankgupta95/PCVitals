@@ -107,6 +107,9 @@ public sealed class AppSettings
     // Dashboard
     public string DashboardPage { get; set; } = "overview";
     public int GraphSeconds { get; set; } = 60;
+    /// <summary>Dashboard window position and size when not maximised ("x,y,width,height"), or null before it was first moved.</summary>
+    public string? DashboardBounds { get; set; }
+    public bool DashboardMaximized { get; set; }
 
     // History saved to disk (see HistoryArchive.DefaultDir)
     public bool HistoryEnabled { get; set; } = true;

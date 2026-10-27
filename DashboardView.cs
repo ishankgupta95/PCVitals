@@ -1,5 +1,4 @@
 using System.Drawing.Drawing2D;
-using System.Runtime.InteropServices;
 using LibreHardwareMonitor.Hardware;
 using Microsoft.Win32;
 
@@ -64,12 +63,9 @@ sealed class DashboardView : Control
     int _dragStartY;
     float _dragStartScroll;
     Point _mouse = new(-1, -1);
-    bool _pinned;
     UiFonts _f = null!;
     static string? _osName;
 
-    public event Action? CloseRequested;
-    public event Action? PinToggled;
     public event Action? RestartAsAdminRequested;
     public event Action? SettingsRequested;
     public event Action? SensorsChanged;
@@ -85,16 +81,6 @@ sealed class DashboardView : Control
     /// <summary>Overrides the machine name in the header (used for README screenshots).</summary>
     public string? MachineLabel { get; set; }
     public int ContentHeight => _contentHeight;
-
-    public bool Pinned
-    {
-        get => _pinned;
-        set
-        {
-            _pinned = value;
-            Invalidate();
-        }
-    }
 
     public DashboardView(AppSettings settings, bool isAdmin)
     {
@@ -355,12 +341,9 @@ sealed class DashboardView : Control
             _hits.Add((r, b.Action, b.Text));
         }
 
+        // The window's own title bar has close, minimise and maximise; the header only adds Settings.
         int btn = S(32);
-        var close = new Rectangle(width - pad - btn + S(6), S(13), btn, btn);
-        var pin = new Rectangle(close.Left - btn - S(2), close.Top, btn, btn);
-        var gear = new Rectangle(pin.Left - btn - S(2), close.Top, btn, btn);
-        DrawIconButton(g, close, "", Theme.TextDim, "Close", () => CloseRequested?.Invoke());
-        DrawIconButton(g, pin, Pinned ? "" : "", Pinned ? Theme.Cpu : Theme.TextDim, Pinned ? "Unpin dashboard" : "Pin dashboard (keep it open)", () => PinToggled?.Invoke());
+        var gear = new Rectangle(width - pad - btn + S(6), S(13), btn, btn);
         DrawIconButton(g, gear, "", Theme.TextDim, "Settings", () => SettingsRequested?.Invoke());
     }
 
@@ -1205,38 +1188,19 @@ sealed class DashboardView : Control
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(Item("Reset min, max and average", false, () => ResetMinMaxRequested?.Invoke(id)));
 
-        // The menu must not count as the flyout losing focus.
-        if (FindForm() is DashboardForm form)
-        {
-            form.HoldOpen = true;
-            menu.Closed += (_, _) => BeginInvoke(() => form.HoldOpen = false);
-        }
         menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
         menu.Show(screen);
     }
 
     void Rename(string id, string original, string current)
     {
-        var form = FindForm() as DashboardForm;
-        if (form != null) form.HoldOpen = true;
-        try
-        {
-            var text = TextPrompt.Ask(FindForm(), "Rename sensor", $"Shown everywhere instead of \"{original}\". Leave empty to use the original name.",
-                                      current == original ? "" : current, original);
-            if (text == null) return;
-            _settings.UpdateSensor(id, p => p.DisplayName = text.Trim().Length == 0 || text.Trim() == original ? null : text.Trim());
-            _settings.Save();
-            SensorsChanged?.Invoke();
-            Invalidate();
-        }
-        finally
-        {
-            if (form != null)
-            {
-                form.HoldOpen = false;
-                form.Activate();
-            }
-        }
+        var text = TextPrompt.Ask(FindForm(), "Rename sensor", $"Shown everywhere instead of \"{original}\". Leave empty to use the original name.",
+                                  current == original ? "" : current, original);
+        if (text == null) return;
+        _settings.UpdateSensor(id, p => p.DisplayName = text.Trim().Length == 0 || text.Trim() == original ? null : text.Trim());
+        _settings.Save();
+        SensorsChanged?.Invoke();
+        Invalidate();
     }
 
     internal static string GroupName(SensorType t) => t switch
@@ -1468,12 +1432,6 @@ sealed class DashboardView : Control
             return;
         }
 
-        // Dragging the header (outside its buttons) moves the window, handy when pinned.
-        if (e.Y < _viewport.Top && !_hits.Any(h => h.Rect.Contains(e.Location)) && FindForm() is { } form)
-        {
-            ReleaseCapture();
-            SendMessage(form.Handle, 0xA1 /* WM_NCLBUTTONDOWN */, (IntPtr)2 /* HTCAPTION */, IntPtr.Zero);
-        }
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -1528,10 +1486,4 @@ sealed class DashboardView : Control
         base.OnDpiChangedAfterParent(e);
         Invalidate();
     }
-
-    [DllImport("user32.dll")]
-    static extern bool ReleaseCapture();
-
-    [DllImport("user32.dll")]
-    static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 }

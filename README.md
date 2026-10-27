@@ -125,8 +125,9 @@ dotnet test tests/PCVitals.Tests
 | Action | Result |
 |---|---|
 | Hover a taskbar item | Detail card for that component |
-| Click a taskbar item | Open the dashboard on that item's page (click again to close) |
-| Click the tray icon | Open or close the dashboard |
+| Click a taskbar item | Open the dashboard on that item's page (click the same item again to minimise it) |
+| Click the tray icon | Open the dashboard, or bring it to the front |
+| Close the dashboard window | It hides; PC Vitals keeps running in the tray (exit from the tray menu) |
 | Drag the taskbar strip sideways | Move it (Settings → Taskbar → Reset puts it back) |
 | Right-click the strip or tray icon | Menu: dashboard, settings, refresh rate, start with Windows, exit |
 | Ctrl+↑ / Ctrl+↓ in the dashboard | Previous / next device |
