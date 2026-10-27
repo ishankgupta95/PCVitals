@@ -127,10 +127,32 @@ static class Native
         if (cls.ToString() is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd") return false;
         if (!GetWindowRect(fg, out var r)) return false;
         var screen = Screen.FromHandle(fg);
-        var b = screen.Bounds;
         return screen.DeviceName == Screen.FromHandle(taskbar).DeviceName &&
-               r.Left <= b.Left && r.Top <= b.Top && r.Right >= b.Right && r.Bottom >= b.Bottom;
+               IsFullscreen(Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom), screen.Bounds, IsZoomed(fg));
     }
+
+    /// <summary>
+    /// A window counts as fullscreen when it covers the whole monitor and isn't simply maximised.
+    /// With an auto-hiding taskbar a maximised window covers the monitor too (slightly overlapping
+    /// it with its borders), yet the taskbar still slides up over it, so the stats should too.
+    /// Fullscreen games, videos and browsers use borderless windows sized to the screen instead.
+    /// </summary>
+    internal static bool IsFullscreen(Rectangle window, Rectangle monitor, bool maximized) =>
+        !maximized && window.Left <= monitor.Left && window.Top <= monitor.Top && window.Right >= monitor.Right && window.Bottom >= monitor.Bottom;
+
+    /// <summary>"Chrome_WidgetWin_1 (-8,-8)-(2568,1448) maximised", for the taskbar report.</summary>
+    public static string ForegroundSummary()
+    {
+        var fg = GetForegroundWindow();
+        if (fg == IntPtr.Zero) return "none";
+        var cls = new StringBuilder(64);
+        GetClassName(fg, cls, cls.Capacity);
+        GetWindowRect(fg, out var r);
+        return $"{cls} ({r.Left},{r.Top})-({r.Right},{r.Bottom}){(IsZoomed(fg) ? " maximised" : "")}";
+    }
+
+    [DllImport("user32.dll")]
+    static extern bool IsZoomed(IntPtr hWnd);
 
     delegate bool EnumProc(IntPtr hwnd, IntPtr lParam);
 

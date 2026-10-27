@@ -116,3 +116,23 @@ public class StripFitTests
         Assert.Null(r.Note);
     }
 }
+
+public class FullscreenTests
+{
+    static readonly Rectangle Monitor = new(0, 0, 2560, 1440);
+
+    [Fact]
+    public void Borderless_window_covering_the_monitor_is_fullscreen() =>
+        Assert.True(Native.IsFullscreen(Monitor, Monitor, maximized: false));
+
+    [Fact]
+    public void Maximised_window_over_an_auto_hiding_taskbar_is_not()
+    {
+        // Maximised windows overhang the monitor by their border width on every side.
+        Assert.False(Native.IsFullscreen(new Rectangle(-8, -8, 2576, 1456), Monitor, maximized: true));
+    }
+
+    [Fact]
+    public void Ordinary_windows_are_not() =>
+        Assert.False(Native.IsFullscreen(new Rectangle(100, 100, 1600, 900), Monitor, maximized: false));
+}

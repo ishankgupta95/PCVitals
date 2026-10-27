@@ -577,6 +577,7 @@ static class Program
         sb.AppendLine($"Start {tb.Start}  Tasks {tb.Tasks}  Icons {tb.Icons}  Tray {tb.Tray}");
         int free = (tb.Tray.Left - 8 * tb.Dpi / 96) - (tb.Icons.Right + 8 * tb.Dpi / 96);
         sb.AppendLine($"Free gap between icons and tray: {free}px");
+        sb.AppendLine($"Foreground window: {Native.ForegroundSummary()}; strip hides for fullscreen: {Native.FullscreenAppActive(tb.Handle)}");
 
         using var hw = new HardwareService();
         hw.UpdateOnce();
