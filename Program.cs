@@ -31,6 +31,15 @@ static class Program
                 return 1;
             }
         }
+        if (args.Length >= 2 && args[0] == "--bench-history")
+        {
+            try { return BenchHistory(args[1]); }
+            catch (Exception ex)
+            {
+                File.WriteAllText(args[1], ex.ToString());
+                return 1;
+            }
+        }
         if (args.Length >= 2 && args[0] == "--bench")
         {
             try { return Bench(args[1]); }
@@ -216,6 +225,67 @@ static class Program
         catch
         {
             return 1;
+        }
+    }
+
+    /// <summary>
+    /// Builds a month of synthetic saved history (60 series, as on a busy desktop) in a temporary
+    /// folder and times what the app does with it: a minute's append, daily clean-up, and loading
+    /// the 7 d / 30 d graphs.
+    /// </summary>
+    static int BenchHistory(string path)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "pcvitals-bench-history-" + Guid.NewGuid().ToString("N"));
+        var sb = new StringBuilder();
+        try
+        {
+            var archive = new HistoryArchive(dir);
+            var keys = Enumerable.Range(0, 60).Select(i => i < 20 ? $"series{i}" : $"/bench/0/temperature/{i}").ToArray();
+            static (string, string) Describe(string k) => (k, "°C");
+            var now = DateTime.Now;
+            var start = now.Date.AddDays(-29);
+            var sw = Stopwatch.StartNew();
+            var rng = new Random(1);
+            var values = new MinuteSummary[keys.Length];
+            int minutes = 0;
+            // Write whole days at once (the app appends one minute at a time; that is timed below).
+            for (var day = start; day < now; day = day.AddDays(1))
+            {
+                var records = new List<HistoryRecord>();
+                for (var m = day; m < day.AddDays(1) && m < now; m = m.AddMinutes(1), minutes++)
+                    for (int s = 0; s < keys.Length; s++)
+                    {
+                        float v = 40 + 20 * MathF.Sin((minutes + s * 37) / 300f) + rng.NextSingle() * 5;
+                        records.Add(new HistoryRecord(HistoryFile.ToMinute(m), archive.Series.IndexOf(keys[s], Describe), v, v - 3, v + 3));
+                    }
+                HistoryFile.Append(HistoryFile.PathFor(dir, DateOnly.FromDateTime(day)), records);
+            }
+            archive.Series.Save();
+            sb.AppendLine($"Wrote {minutes:N0} minutes × {keys.Length} series in {sw.ElapsedMilliseconds} ms ({archive.SizeBytes() / 1048576.0:0.0} MB)");
+
+            sw.Restart();
+            archive.Maintain(DateOnly.FromDateTime(now), 30);
+            sb.AppendLine($"Daily clean-up (compact days older than a week): {sw.ElapsedMilliseconds} ms, now {archive.SizeBytes() / 1048576.0:0.0} MB");
+
+            for (int s = 0; s < keys.Length; s++) values[s] = new MinuteSummary(keys[s], 50, 49, 51);
+            sw.Restart();
+            for (int i = 0; i < 100; i++) archive.Append(now.AddMinutes(i), values, Describe);
+            sb.AppendLine($"Append one minute (60 series): {sw.Elapsed.TotalMilliseconds / 100:0.00} ms");
+
+            foreach (var (days, bucket) in new[] { (1, 1), (7, 5), (30, 60) })
+            {
+                archive.Load(now.AddDays(-days), now, bucket); // warm the file cache, as a second view would be
+                sw.Restart();
+                var range = archive.Load(now.AddDays(-days), now, bucket);
+                sb.AppendLine($"Load {days} d at {bucket}-minute buckets: {sw.ElapsedMilliseconds} ms ({range.Series.Count} series × {range.Count} points)");
+            }
+            File.WriteAllText(path, sb.ToString());
+            return 0;
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); }
+            catch { }
         }
     }
 
@@ -545,6 +615,31 @@ static class Program
             bmp.Save(Path.Combine(dir, file), ImageFormat.Png);
         }
 
+        // A week of saved history on the CPU page. Uses the real archive when it has a week, else a made-up one.
+        Theme.Apply(ThemeMode.Dark);
+        var weekDir = Path.Combine(Path.GetTempPath(), "pcvitals-preview-history");
+        try
+        {
+            var real = new HistoryArchive(HistoryArchive.DefaultDir);
+            var archive = real.Days().Count() >= 7 ? real : SyntheticWeek(weekDir);
+            settings.DashboardPage = "cpu";
+            settings.GraphSeconds = 7 * 86400;
+            var week = archive.Load(DateTime.Now.AddDays(-7), DateTime.Now, 5);
+            using var view = new DashboardView(settings, IsAdmin()) { MachineLabel = "My PC", HistoryProvider = hw.GetHistory, LongHistoryProvider = _ => week };
+            int w = (int)(920 * view.DeviceDpi / 96f), h = (int)(740 * view.DeviceDpi / 96f);
+            view.Size = new Size(w, h);
+            view.SetSnapshot(snap);
+            using var bmp = new Bitmap(w, h);
+            view.DrawToBitmap(bmp, new Rectangle(0, 0, w, h));
+            bmp.Save(Path.Combine(dir, "dashboard-cpu-week.png"), ImageFormat.Png);
+            settings.GraphSeconds = 60;
+        }
+        finally
+        {
+            try { Directory.Delete(weekDir, recursive: true); }
+            catch { }
+        }
+
         // Settings pages.
         foreach (var (file, page, mode) in new[]
                  {
@@ -580,6 +675,31 @@ static class Program
         return 0;
     }
 
+    /// <summary>A plausible week of CPU usage and temperature (busy days, quiet nights), for previews.</summary>
+    static HistoryArchive SyntheticWeek(string dir)
+    {
+        if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        var archive = new HistoryArchive(dir);
+        var rng = new Random(7);
+        var now = DateTime.Now;
+        for (var day = now.Date.AddDays(-7); day < now; day = day.AddDays(1))
+        {
+            var records = new List<HistoryRecord>();
+            for (var m = day; m < day.AddDays(1) && m < now; m = m.AddMinutes(1))
+            {
+                // Off overnight (no records), working by day with bursts.
+                if (m.Hour < 8) continue;
+                float load = 8 + 25 * MathF.Max(0, MathF.Sin((m.Hour - 8) / 16f * MathF.PI)) + (rng.NextSingle() < 0.03f ? 50 : 0) + rng.NextSingle() * 6;
+                float temp = 42 + load * 0.45f + rng.NextSingle() * 2;
+                records.Add(new HistoryRecord(HistoryFile.ToMinute(m), archive.Series.IndexOf("cpu", _ => ("CPU usage", "%")), load, load * 0.4f, Math.Min(100, load * 1.8f + 5)));
+                records.Add(new HistoryRecord(HistoryFile.ToMinute(m), archive.Series.IndexOf("cputemp", _ => ("CPU temperature", "°C")), temp, temp - 2, temp + 6));
+            }
+            HistoryFile.Append(HistoryFile.PathFor(dir, DateOnly.FromDateTime(day)), records);
+        }
+        archive.Series.Save();
+        return archive;
+    }
+
     /// <summary>The first sensor of a type whose name contains one of <paramref name="names"/> (in that order of preference).</summary>
     static SensorEntry? PreviewSensor(Snapshot snap, SensorType type, params string[] names)
     {
@@ -607,6 +727,9 @@ static class Program
         public void SettingsChanged() { }
         public void RecalibrateGpuPower() { }
         public int ExportHistory(string path) => 0;
+        public HistoryArchive? Archive => null;
+        public long HistorySizeBytes => 1_600_000;
+        public Task DeleteHistoryAsync() => Task.CompletedTask;
         public void ReopenSettings(string page) { }
     }
 }

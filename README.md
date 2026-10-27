@@ -36,8 +36,13 @@ for a dashboard of every sensor in your machine.
 ### Dashboard
 - **Device rail** with live thumbnails (CPU, each GPU, memory, each drive,
   network, motherboard, battery/PSU when present). Click a taskbar item to jump straight to its page.
-- **Big history graph** for 1, 5 or 15 minutes, or 1 or 24 hours (one-minute averages), with temperature
-  overlaid on its own axis and a hover crosshair. Export the history as CSV from Settings → About.
+- **Big history graph** for 1, 5 or 15 minutes, 1 or 24 hours (one-minute averages), or 7 or 30 days (saved
+  history, with the minimum-to-maximum range shaded behind the average), with temperature overlaid on its own
+  axis and a hover crosshair that shows the date and time.
+- **Saved history**: one-minute averages, minimums and maximums of the headline readings and your favourite and
+  pinned sensors are kept on disk for 30 days by default (7, 30 or 90), so the graphs continue across restarts.
+  About 1–2 MB a day; days older than a week are folded into 5-minute periods. Export any period as CSV, at
+  1-minute, 5-minute or hourly resolution. Turn it off or delete it in Settings → General.
 - **Stat tiles** per device: clocks, power vs. limit, hot spot / memory junction, VRAM, fan state, drive wear and
   lifetime writes, DIMM temperatures, battery wear and capacity, process/thread/handle counts and more.
 - **Top processes** by CPU, memory or GPU (grouped by app, with a per-app GPU column), and a per-thread CPU load
@@ -65,7 +70,8 @@ Sidebar navigation and setting cards, with a live preview of the taskbar strip a
 - **Primary GPU** choice on multi-GPU systems, with discrete/integrated labels.
 - **Start with Windows** without a UAC prompt at each sign-in (a scheduled task with highest privileges).
 
-No network access, no telemetry. Settings live in `%APPDATA%\PCVitals\settings.json`.
+No network access, no telemetry. Settings live in `%APPDATA%\PCVitals\settings.json`, saved history in
+`%LOCALAPPDATA%\PCVitals\history` (one file per day; it never leaves your PC).
 
 ## Requirements
 
@@ -161,6 +167,7 @@ PCVitals.exe --dump sensors.txt              # every sensor and its value (also:
 PCVitals.exe --bench bench.txt               # startup, per-device poll cost, CPU and memory
 PCVitals.exe --memprofile mem.txt            # private memory per library / sensor group
 PCVitals.exe --memprofile mem.txt pipeline   # the same for the app's actual lean path
+PCVitals.exe --bench-history hist.txt       # write, compact and load a synthetic month of saved history
 PCVitals.exe --taskbar-report tb.txt         # taskbar geometry and how wide the strip would be
 PCVitals.exe --preview docs                  # render the README screenshots
 PCVitals.exe --replace                       # replace a running instance with this build
@@ -180,6 +187,8 @@ Found a bug? Please [open an issue](../../issues/new/choose) and attach the sens
 | `Core/HardwareService.cs` | Owns LibreHardwareMonitor, polls on a background thread, builds snapshots and summaries |
 | `Core/Readings.cs` / `Core/SensorCatalog.cs` | Readings with stable sensor ids, saved sensor references, and sensor lookup and search |
 | `Core/HistoryStore.cs` | Recent and one-minute history, by sensor id with aliases for the headline series |
+| `Core/HistoryArchive.cs` / `Core/HistoryRecorder.cs` | Saved history: day files, series map, loading, clean-up, and the background writer |
+| `Core/HistoryCsv.cs` / `Core/HeadlineSeries.cs` | CSV export of saved history, and names for the headline series |
 | `Core/NvmlFeed.cs` | Helper process that streams NVML readings while the dashboard is open |
 | `ProcessStats.cs` / `GpuProcessUsage.cs` | Top processes by CPU, memory and GPU |
 | `Vitals.cs` | Turns a snapshot into display items (labels, values, detail rows) shared by every view |
@@ -189,6 +198,7 @@ Found a bug? Please [open an issue](../../issues/new/choose) and attach the sens
 | `DashboardForm.cs` / `DashboardView.cs` | The dashboard window (owner-drawn) |
 | `SettingsForm.cs` / `SettingsControls.cs` | Settings window and its toggle, card, dropdown and preview controls |
 | `SensorDialogs.cs` | The sensor picker and the rename prompt |
+| `HistoryDialogs.cs` | The history export dialog |
 | `TrayContext.cs` | App lifetime, tray icons, menu, alerts and wiring |
 | `AppSettings.cs` | Settings persistence and the start-with-Windows task |
 | `Theme.cs` | Light, dark and AMOLED palettes, and value formatting |

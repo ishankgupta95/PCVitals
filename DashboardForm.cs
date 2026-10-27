@@ -102,6 +102,15 @@ sealed class DashboardForm : Form
         set => _view.MinuteHistoryProvider = value;
     }
 
+    public Func<int, HistoryRange?>? LongHistoryProvider
+    {
+        get => _view.LongHistoryProvider;
+        set => _view.LongHistoryProvider = value;
+    }
+
+    /// <summary>Repaints with data that arrived in the background (e.g. saved history).</summary>
+    public void RefreshView() => _view.Invalidate();
+
     /// <summary>Re-reads theme colours after the palette changed.</summary>
     public void ApplyTheme()
     {

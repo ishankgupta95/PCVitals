@@ -20,8 +20,8 @@ sealed class DashboardView : Control
         SensorType.Throughput, SensorType.Level, SensorType.Energy, SensorType.Factor, SensorType.TimeSpan,
     };
 
-    // Up to 15 min uses per-refresh samples; 1 h and 24 h use one-minute averages.
-    static readonly int[] Ranges = { 60, 300, 900, 3600, 86400 };
+    // Up to 15 min uses per-refresh samples; 1 h and 24 h use one-minute averages; 7 d and 30 d saved history.
+    static readonly int[] Ranges = { 60, 300, 900, 3600, 86400, 7 * 86400, 30 * 86400 };
     static readonly Color TempLine = Color.FromArgb(255, 150, 90);
 
     enum ProcessSort { None, Cpu, Memory, Gpu }
@@ -79,6 +79,8 @@ sealed class DashboardView : Control
     public Func<string, int, float[]>? HistoryProvider { get; set; }
     /// <summary>Supplies one-minute averages for the 1 h / 24 h ranges: (series key, minutes) → samples.</summary>
     public Func<string, int, float[]>? MinuteHistoryProvider { get; set; }
+    /// <summary>Saved history for the 7 d / 30 d ranges (range in seconds), or null while it loads; unset when history is off.</summary>
+    public Func<int, HistoryRange?>? LongHistoryProvider { get; set; }
     /// <summary>Overrides the machine name in the header (used for README screenshots).</summary>
     public string? MachineLabel { get; set; }
     public int ContentHeight => _contentHeight;
@@ -641,16 +643,29 @@ sealed class DashboardView : Control
         if (card.Bottom < _viewport.Top || card.Top > _viewport.Bottom) return card.Bottom;
         Gfx.FillRounded(g, card, S(10), Theme.Surface);
 
-        int seconds = _settings.GraphSeconds;
-        bool minuteTier = seconds > 900;
-        int samples = minuteTier
-            ? Math.Clamp(seconds / 60, 2, HardwareService.MinuteHistoryLength)
+        // 7 d / 30 d come from saved history; without it, fall back to the longest in-memory range.
+        int seconds = _settings.GraphSeconds > 86400 && LongHistoryProvider == null ? 86400 : _settings.GraphSeconds;
+        bool savedTier = seconds > 86400;
+        bool minuteTier = seconds > 900 && !savedTier;
+        HistoryRange? saved = savedTier ? LongHistoryProvider!(seconds) : null;
+        int samples = savedTier ? Math.Max(2, saved?.Count ?? 2)
+            : minuteTier ? Math.Clamp(seconds / 60, 2, HardwareService.MinuteHistoryLength)
             : Math.Clamp(seconds * 1000 / Math.Max(100, _settings.IntervalMs), 2, HardwareService.LongHistoryLength);
-        int secondsPerSample = minuteTier ? 60 : Math.Max(1, _settings.IntervalMs / 1000);
+        int secondsPerSample = savedTier ? (saved?.BucketMinutes ?? 60) * 60 : minuteTier ? 60 : Math.Max(1, _settings.IntervalMs / 1000);
         var provider = minuteTier ? MinuteHistoryProvider : HistoryProvider;
-        float[] main = provider?.Invoke(page.MainSeries!, samples) ?? (minuteTier ? null : _snap!.History.GetValueOrDefault(page.MainSeries!)) ?? Array.Empty<float>();
-        float[]? second = page.SecondSeries == null ? null
-            : provider?.Invoke(page.SecondSeries, samples) ?? (minuteTier ? null : _snap!.History.GetValueOrDefault(page.SecondSeries));
+        float[] main, mainMin = Array.Empty<float>(), mainMax2 = Array.Empty<float>();
+        float[]? second;
+        if (savedTier)
+        {
+            (main, mainMin, mainMax2) = saved?.Series.GetValueOrDefault(page.MainSeries!) is { Avg: not null } m ? m : (Array.Empty<float>(), Array.Empty<float>(), Array.Empty<float>());
+            second = page.SecondSeries != null && saved?.Series.TryGetValue(page.SecondSeries, out var sec) == true ? sec.Avg : null;
+        }
+        else
+        {
+            main = provider?.Invoke(page.MainSeries!, samples) ?? (minuteTier ? null : _snap!.History.GetValueOrDefault(page.MainSeries!)) ?? Array.Empty<float>();
+            second = page.SecondSeries == null ? null
+                : provider?.Invoke(page.SecondSeries, samples) ?? (minuteTier ? null : _snap!.History.GetValueOrDefault(page.SecondSeries));
+        }
 
         // Legend.
         int lx = x + S(16), ly = y + S(14);
@@ -662,7 +677,8 @@ sealed class DashboardView : Control
         for (int i = Ranges.Length - 1; i >= 0; i--)
         {
             int secs = Ranges[i];
-            var label = secs >= 3600 ? $"{secs / 3600} h" : $"{secs / 60} min";
+            if (secs > 86400 && LongHistoryProvider == null) continue;
+            var label = secs >= 86400 * 2 ? $"{secs / 86400} d" : secs >= 3600 ? $"{secs / 3600} h" : $"{secs / 60} min";
             int cw = Gfx.TextWidth(g, label, _f.Small) + S(18);
             var chip = new Rectangle(cx - cw, y + S(10), cw, S(24));
             bool on = seconds == secs;
@@ -683,7 +699,7 @@ sealed class DashboardView : Control
         var plot = new Rectangle(x + S(tempAxis ? 52 : 16), y + S(46), w - S(tempAxis ? 52 : 16) - S(58), S(160));
         _plot = plot;
 
-        float mainMax = page.MainMax ?? NiceMax(main.Concat(page.SecondIsTemp ? Array.Empty<float>() : second ?? Array.Empty<float>()));
+        float mainMax = page.MainMax ?? NiceMax(main.Concat(mainMax2).Concat(page.SecondIsTemp ? Array.Empty<float>() : second ?? Array.Empty<float>()));
         float tempMax = tempAxis ? Math.Max(100, (float)Math.Ceiling(MaxOf(second!) / 10) * 10) : 0;
 
         // Grid and axis labels.
@@ -702,13 +718,18 @@ sealed class DashboardView : Control
         }
         Gfx.Text(g, $"{FormatRange(seconds)} ago", _f.Small, Theme.TextFaint, new Rectangle(plot.Left, plot.Bottom + S(4), S(120), S(18)));
         Gfx.Text(g, "now", _f.Small, Theme.TextFaint, new Rectangle(plot.Right - S(60), plot.Bottom + S(4), S(60), S(18)), TextFormatFlags.Right);
-        if (minuteTier && main.Length < 2)
-            Gfx.Text(g, "One-minute averages build up while PC Vitals runs (up to 24 hours).", _f.Small, Theme.TextDim, plot,
-                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        string? empty = savedTier
+            ? saved == null ? "Reading saved history…"
+              : main.All(float.IsNaN) ? $"Saved history builds up while PC Vitals runs (kept for {_settings.HistoryRetentionDays} days)." : null
+            : minuteTier && main.Length < 2 ? "One-minute averages build up while PC Vitals runs (up to 24 hours)." : null;
+        if (empty != null)
+            Gfx.Text(g, empty, _f.Small, Theme.TextDim, plot, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
 
         var state = g.Save();
         g.SetClip(Rectangle.Inflate(plot, 0, 2), CombineMode.Intersect);
-        DrawSeries(g, plot, main, samples, mainMax, page.Accent, fill: true);
+        bool band = mainMin.Length == main.Length && main.Length > 0;
+        if (band) DrawBand(g, plot, mainMin, mainMax2, samples, mainMax, page.Accent);
+        DrawSeries(g, plot, main, samples, mainMax, page.Accent, fill: !band);
         if (second != null)
             DrawSeries(g, plot, second, samples, page.SecondIsTemp ? tempMax : mainMax, page.SecondIsTemp ? TempLine : Theme.Ram, fill: false);
         g.Restore(state);
@@ -723,11 +744,17 @@ sealed class DashboardView : Control
             {
                 float px = plot.Right - fromRight * step;
                 using (var pen = new Pen(Theme.TextFaint)) g.DrawLine(pen, px, plot.Top, px, plot.Bottom);
+                // Ranges of an hour and more say when: the minute tier and saved history are real timelines.
+                var when = savedTier && saved != null ? saved.TimeOf(idx).ToString("ddd d MMM, HH:mm")
+                    : seconds >= 3600 ? DateTime.Now.AddSeconds(-fromRight * secondsPerSample).ToString(seconds > 3600 ? "ddd HH:mm" : "HH:mm")
+                    : $"{FormatRange(fromRight * secondsPerSample)} ago";
                 var lines = new List<(string, Color)>
                 {
-                    ($"{FormatRange(fromRight * secondsPerSample)} ago", Theme.TextDim),
+                    (when, Theme.TextDim),
                     ($"{page.MainLabel}: {(float.IsNaN(main[idx]) ? "—" : page.MainFormat(main[idx]))}", page.Accent),
                 };
+                if (band && !float.IsNaN(mainMin[idx]))
+                    lines.Add(($"Range: {page.MainFormat(mainMin[idx])} – {page.MainFormat(mainMax2[idx])}", Theme.TextDim));
                 if (second != null)
                 {
                     int sIdx = second.Length - 1 - fromRight;
@@ -751,6 +778,39 @@ sealed class DashboardView : Control
         using (var b = new SolidBrush(color)) g.FillRectangle(b, x, y + S(8), S(12), S(3));
         Gfx.Text(g, label, _f.Small, Theme.TextDim, new Rectangle(x + S(18), y, S(200), S(18)));
         return x + S(18) + Gfx.TextWidth(g, label, _f.Small);
+    }
+
+    /// <summary>Shades between the per-bucket minimum and maximum, behind the average line.</summary>
+    void DrawBand(Graphics g, Rectangle plot, float[] min, float[] max, int samples, float axisMax, Color color)
+    {
+        if (min.Length < 2 || axisMax <= 0) return;
+        float step = plot.Width / (float)(samples - 1);
+        float Y(float v) => plot.Bottom - Math.Clamp(v / axisMax, 0, 1) * plot.Height;
+        using var brush = new SolidBrush(Theme.WithAlpha(color, 48));
+        var upper = new List<PointF>();
+        var lower = new List<PointF>();
+        void Flush()
+        {
+            if (upper.Count >= 2)
+            {
+                lower.Reverse();
+                g.FillPolygon(brush, upper.Concat(lower).ToArray());
+            }
+            upper.Clear();
+            lower.Clear();
+        }
+        for (int i = 0; i < min.Length; i++)
+        {
+            if (float.IsNaN(min[i]) || float.IsNaN(max[i]))
+            {
+                Flush();
+                continue;
+            }
+            float px = plot.Right - (min.Length - 1 - i) * step;
+            upper.Add(new PointF(px, Y(max[i])));
+            lower.Add(new PointF(px, Y(min[i])));
+        }
+        Flush();
     }
 
     void DrawSeries(Graphics g, Rectangle plot, float[] values, int samples, float max, Color color, bool fill)
@@ -810,6 +870,7 @@ sealed class DashboardView : Control
 
     static string FormatRange(int seconds) => seconds switch
     {
+        >= 2 * 86400 => $"{seconds / 86400} days",
         >= 3600 => $"{seconds / 3600} h{(seconds % 3600 / 60 != 0 ? $" {seconds % 3600 / 60} min" : "")}",
         >= 60 => $"{seconds / 60} min{(seconds % 60 != 0 ? $" {seconds % 60} s" : "")}",
         _ => $"{seconds} s",

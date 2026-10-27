@@ -277,5 +277,13 @@ static class Fmt
         return $"{ts.Minutes}m {ts.Seconds}s";
     }
 
+    public static string Bytes(long bytes) => bytes switch
+    {
+        < 1024 => $"{bytes} bytes",
+        < 1024 * 1024 => $"{bytes / 1024.0:0} KB",
+        < 1024L * 1024 * 1024 => $"{bytes / 1048576.0:0.0} MB",
+        _ => $"{bytes / 1073741824.0:0.00} GB",
+    };
+
     public static string Num(float? v, string format = "0") => v is { } x ? x.ToString(format) : "--";
 }

@@ -70,7 +70,11 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         {
             _hw.DetailedMode = _dash.Visible;
             if (_dash.Visible) _hw.Poke();
-            else Native.TrimWorkingSet();
+            else
+            {
+                _longRange = null; // the 7 d / 30 d data is only kept while the dashboard is open
+                Native.TrimWorkingSet();
+            }
         };
 
         _menu = BuildMenu();
@@ -108,6 +112,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             try { _dash.BeginInvoke(SavePowerCalibration); }
             catch (InvalidOperationException) { }
         };
+        ApplyHistory(seed: true);
         _hw.AddConsumer(new SnapshotConsumer(snap =>
         {
             if (_exiting) return;
@@ -116,6 +121,93 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         }));
         _hw.Start();
     }
+
+    // ---- History on disk ------------------------------------------------------------------
+
+    HistoryArchive? _archive;
+    HistoryRecorder? _recorder;
+    HistoryRange? _longRange;
+    int _longRangeSeconds;
+    DateTime _longRangeLoaded;
+    bool _longRangeLoading;
+
+    /// <summary>Starts or stops saving history to match the settings.</summary>
+    void ApplyHistory(bool seed = false)
+    {
+        if (_settings.HistoryEnabled && _recorder == null)
+        {
+            try
+            {
+                _archive ??= new HistoryArchive(HistoryArchive.DefaultDir);
+                _recorder = new HistoryRecorder(_archive, key => HeadlineSeries.Describe(key, _hw.Latest)) { RetentionDays = _settings.HistoryRetentionDays };
+                _hw.History.MinuteClosed += _recorder.Enqueue;
+                var archive = _archive;
+                // On the poll thread before its first reading, so the 1 h / 24 h graphs continue where they left off.
+                if (seed) _hw.Enqueue(_ => _hw.History.Seed(archive.Load(DateTime.Now.AddHours(-24), DateTime.Now, 1)));
+            }
+            catch (Exception ex)
+            {
+                Program.Log("Couldn't start saving history: " + ex);
+            }
+        }
+        else if (!_settings.HistoryEnabled && _recorder != null)
+        {
+            _hw.History.MinuteClosed -= _recorder.Enqueue;
+            _recorder.Dispose();
+            _recorder = null;
+        }
+        if (_recorder != null && _recorder.RetentionDays != _settings.HistoryRetentionDays)
+        {
+            _recorder.RetentionDays = _settings.HistoryRetentionDays;
+            _recorder.MaintainNow();
+        }
+        _dash.LongHistoryProvider = _recorder != null ? LongHistory : null;
+        _longRange = null;
+    }
+
+    /// <summary>
+    /// The 7 d / 30 d graph data: loaded in the background (5-minute or hourly buckets), kept for a
+    /// minute while the dashboard shows it. Null while loading.
+    /// </summary>
+    HistoryRange? LongHistory(int seconds)
+    {
+        bool fresh = _longRange != null && _longRangeSeconds == seconds && (DateTime.Now - _longRangeLoaded).TotalSeconds < 60;
+        if (fresh || _longRangeLoading || _archive is not { } archive) return _longRangeSeconds == seconds ? _longRange : null;
+        _longRangeLoading = true;
+        int bucket = seconds > 7 * 86400 ? 60 : 5;
+        Task.Run(() =>
+        {
+            HistoryRange? range = null;
+            try { range = archive.Load(DateTime.Now.AddSeconds(-seconds), DateTime.Now, bucket); }
+            catch (Exception ex) { Program.Log("Couldn't read history: " + ex); }
+            try
+            {
+                _dash.BeginInvoke(() =>
+                {
+                    _longRange = range;
+                    _longRangeSeconds = seconds;
+                    _longRangeLoaded = DateTime.Now;
+                    _longRangeLoading = false;
+                    _dash.RefreshView();
+                });
+            }
+            catch (InvalidOperationException) { }
+        });
+        return _longRangeSeconds == seconds ? _longRange : null;
+    }
+
+    public long HistorySizeBytes => _archive?.SizeBytes() ?? 0;
+
+    public Task DeleteHistoryAsync()
+    {
+        _longRange = null;
+        if (_recorder != null) return _recorder.DeleteAllAsync();
+        _archive ??= new HistoryArchive(HistoryArchive.DefaultDir);
+        _archive.DeleteAll();
+        return Task.CompletedTask;
+    }
+
+    public HistoryArchive? Archive => _settings.HistoryEnabled ? _archive : null;
 
     void ApplyToService()
     {
@@ -347,6 +439,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     public void SettingsChanged()
     {
         ApplyToService();
+        ApplyHistory();
         _hw.Poke();
         Fmt.Fahrenheit = _settings.Fahrenheit;
         ApplyHotkey();
@@ -710,6 +803,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         if (!_widget.IsDisposed) _widget.Close();
         _widget.Dispose();
         _hw.Dispose();
+        _recorder?.Dispose();
         if (!_dash.IsDisposed) _dash.Close();
         _dash.Dispose();
         ExitThread();

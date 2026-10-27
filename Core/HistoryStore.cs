@@ -6,12 +6,18 @@ namespace PCVitals.Core;
 /// point at the sensor they're currently read from, or are keys of their own when computed from
 /// several sensors. Written on the poll thread, read from any thread.
 /// </summary>
+/// <remarks>
+/// The minute tier is a real timeline: every series gets one value per minute (NaN when it had no
+/// reading, the PC slept or the app wasn't running), so all series line up with the minute stamps.
+/// </remarks>
 public sealed class HistoryStore
 {
     readonly int _longLength, _minuteLength;
     readonly Dictionary<string, Ring> _history = new();
     readonly Dictionary<string, Ring> _minutes = new();
     readonly Dictionary<string, (double Sum, int Count)> _minuteAcc = new();
+    /// <summary>Per pushed name (alias or sensor id): what <see cref="MinuteClosed"/> reports.</summary>
+    readonly Dictionary<string, (double Sum, int Count, float Min, float Max)> _summaryAcc = new();
     readonly Dictionary<string, string> _aliases = new();
     readonly DateTime[] _minuteStamps;
     int _minuteNext, _minuteStampCount;
@@ -23,6 +29,12 @@ public sealed class HistoryStore
         _minuteLength = minuteLength;
         _minuteStamps = new DateTime[minuteLength];
     }
+
+    /// <summary>
+    /// Raised on the poll thread when a minute ends, with the average, minimum and maximum of every
+    /// series pushed during it (under the name it was pushed with: alias or sensor id).
+    /// </summary>
+    public event Action<DateTime, IReadOnlyList<MinuteSummary>>? MinuteClosed;
 
     /// <summary>The series key an alias currently points at (the alias itself if it has no source).</summary>
     public string Resolve(string key)
@@ -41,6 +53,8 @@ public sealed class HistoryStore
             string key = alias;
             if (sourceId != null)
             {
+                if (!_aliases.ContainsKey(alias) && !_minutes.ContainsKey(sourceId) && _minutes.Remove(alias, out var seeded))
+                    _minutes[sourceId] = seeded; // history loaded from disk under the alias belongs to its sensor
                 _aliases[alias] = sourceId;
                 key = sourceId;
             }
@@ -54,6 +68,9 @@ public sealed class HistoryStore
             {
                 var acc = _minuteAcc.GetValueOrDefault(key);
                 _minuteAcc[key] = (acc.Sum + v, acc.Count + 1);
+                _summaryAcc[alias] = _summaryAcc.TryGetValue(alias, out var s)
+                    ? (s.Sum + v, s.Count + 1, Math.Min(s.Min, v), Math.Max(s.Max, v))
+                    : (v, 1, v, v);
             }
             else
             {
@@ -64,7 +81,8 @@ public sealed class HistoryStore
 
     /// <summary>
     /// Folds the samples of the minute that just ended into the long-term tier: one average per
-    /// series per minute. Call before pushing the first sample of a refresh.
+    /// series per minute, with NaN for minutes nothing ran. Call before pushing the first sample of
+    /// a refresh.
     /// </summary>
     public void RollMinute(DateTime now)
     {
@@ -74,20 +92,70 @@ public sealed class HistoryStore
             _currentMinute = minute;
             return;
         }
-        if (minute == _currentMinute) return;
+        if (minute <= _currentMinute) return; // same minute, or the clock went back
+        var closed = _currentMinute;
+        List<MinuteSummary> summaries;
         lock (_history)
         {
-            foreach (var (key, acc) in _minuteAcc)
-            {
-                if (!_minutes.TryGetValue(key, out var ring)) _minutes[key] = ring = new Ring(_minuteLength);
-                ring.Add(acc.Count > 0 ? (float)(acc.Sum / acc.Count) : float.NaN);
-            }
+            CloseMinute(closed, _minuteAcc);
             _minuteAcc.Clear();
-            _minuteStamps[_minuteNext] = _currentMinute;
-            _minuteNext = (_minuteNext + 1) % _minuteLength;
-            _minuteStampCount = Math.Min(_minuteStampCount + 1, _minuteLength);
+            // Asleep, or the app was busy: those minutes have no readings.
+            int missed = (int)Math.Min(_minuteLength, (minute - closed).TotalMinutes - 1);
+            for (int i = 1; i <= missed; i++) CloseMinute(minute.AddMinutes(-(missed - i + 1)), null);
+            summaries = new List<MinuteSummary>(_summaryAcc.Count);
+            foreach (var (key, s) in _summaryAcc) summaries.Add(new MinuteSummary(key, (float)(s.Sum / s.Count), s.Min, s.Max));
+            _summaryAcc.Clear();
         }
         _currentMinute = minute;
+        if (summaries.Count > 0) MinuteClosed?.Invoke(closed, summaries);
+    }
+
+    void CloseMinute(DateTime minute, Dictionary<string, (double Sum, int Count)>? acc)
+    {
+        if (acc != null)
+            foreach (var key in acc.Keys)
+                if (!_minutes.ContainsKey(key)) _minutes[key] = new Ring(_minuteLength);
+        foreach (var (key, ring) in _minutes)
+            ring.Add(acc != null && acc.TryGetValue(key, out var a) && a.Count > 0 ? (float)(a.Sum / a.Count) : float.NaN);
+        _minuteStamps[_minuteNext] = minute;
+        _minuteNext = (_minuteNext + 1) % _minuteLength;
+        _minuteStampCount = Math.Min(_minuteStampCount + 1, _minuteLength);
+    }
+
+    /// <summary>
+    /// Fills the minute tier from saved history (call once, before the first poll), so the 1 h and
+    /// 24 h graphs survive a restart. Series are stored under the names they were saved with;
+    /// aliases move to their sensor when it is first pushed.
+    /// </summary>
+    public void Seed(HistoryRange range)
+    {
+        if (range.BucketMinutes != 1 || range.Count == 0) return;
+        lock (_history)
+        {
+            int last = -1;
+            foreach (var (_, s) in range.Series)
+                for (int i = range.Count - 1; i > last; i--)
+                    if (!float.IsNaN(s.Avg[i]))
+                    {
+                        last = i;
+                        break;
+                    }
+            if (last < 0) return;
+            int first = Math.Max(0, last + 1 - _minuteLength);
+            foreach (var (key, s) in range.Series)
+            {
+                var ring = _minutes[key] = new Ring(_minuteLength);
+                for (int i = first; i <= last; i++) ring.Add(s.Avg[i]);
+            }
+            for (int i = first; i <= last; i++)
+            {
+                _minuteStamps[_minuteNext] = range.TimeOf(i);
+                _minuteNext = (_minuteNext + 1) % _minuteLength;
+                _minuteStampCount = Math.Min(_minuteStampCount + 1, _minuteLength);
+            }
+            // The next refresh closes this (empty) minute and marks the time the app was off as gaps.
+            _currentMinute = range.TimeOf(last).AddMinutes(1);
+        }
     }
 
     /// <summary>The newest <paramref name="count"/> samples of every series, under both ids and aliases.</summary>

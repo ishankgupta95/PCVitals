@@ -108,6 +108,10 @@ public sealed class AppSettings
     public string DashboardPage { get; set; } = "overview";
     public int GraphSeconds { get; set; } = 60;
 
+    // History saved to disk (see HistoryArchive.DefaultDir)
+    public bool HistoryEnabled { get; set; } = true;
+    public int HistoryRetentionDays { get; set; } = 30;
+
     // Alerts (Windows notifications when a reading stays above its limit)
     public bool AlertCpuEnabled { get; set; }
     public int AlertCpuTemp { get; set; } = 90;

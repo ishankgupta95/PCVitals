@@ -146,7 +146,7 @@ sealed class SensorPicker : Form
             // Arrow keys in the search box move the selection, so typing and picking never need the mouse.
             if (e.KeyCode is Keys.Down or Keys.Up or Keys.PageDown or Keys.PageUp)
             {
-                Move(e.KeyCode switch { Keys.Down => 1, Keys.Up => -1, Keys.PageDown => 10, _ => -10 });
+                MoveSelection(e.KeyCode switch { Keys.Down => 1, Keys.Up => -1, Keys.PageDown => 10, _ => -10 });
                 e.Handled = e.SuppressKeyPress = true;
             }
         };
@@ -163,7 +163,7 @@ sealed class SensorPicker : Form
         _list.KeyDown += (_, e) =>
         {
             if (e.KeyCode is not (Keys.Down or Keys.Up)) return;
-            Move(e.KeyCode == Keys.Down ? 1 : -1);
+            MoveSelection(e.KeyCode == Keys.Down ? 1 : -1);
             e.Handled = true;
         };
         _list.SelectedIndexChanged += (_, _) =>
@@ -223,7 +223,7 @@ sealed class SensorPicker : Form
         if (first >= 0) _list.SelectedIndex = first;
     }
 
-    void Move(int delta)
+    void MoveSelection(int delta)
     {
         if (_rows.Count == 0) return;
         _moving = true;

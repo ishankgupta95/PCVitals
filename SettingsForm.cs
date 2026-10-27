@@ -17,6 +17,10 @@ interface ISettingsHost
     void RecalibrateGpuPower();
     /// <summary>Writes the one-minute history as CSV; returns the number of rows.</summary>
     int ExportHistory(string path);
+    /// <summary>Saved history, when it is switched on.</summary>
+    HistoryArchive? Archive { get; }
+    long HistorySizeBytes { get; }
+    Task DeleteHistoryAsync();
     /// <summary>Rebuilds the settings window (after a reset or theme change) on the given page.</summary>
     void ReopenSettings(string page);
 }
@@ -589,6 +593,37 @@ sealed class SettingsForm : Form
         p.Controls.Add(new Card("Show advanced sensors in the dashboard", "Per-engine GPU load, power connector pins, memory timings and sensor limits.",
                                 Toggle(_s.ShowAdvancedSensors, v => _s.ShowAdvancedSensors = v), ""));
 
+        p.Controls.Add(Section("History"));
+        p.Controls.Add(new Card("Save history", "Keeps one-minute readings on this PC (about 1–2 MB a day, never sent anywhere) for the 7- and 30-day graphs and exports. The 1 hour and 24 hour graphs also continue across restarts.",
+                                Toggle(_s.HistoryEnabled, v => _s.HistoryEnabled = v), ""));
+        var retention = new[] { 7, 30, 90 };
+        p.Controls.Add(new Card("Keep history for", "Older days are deleted. Days older than a week are kept at 5-minute resolution.",
+                                Combo(new[] { "7 days", "30 days", "90 days" }, Math.Max(0, Array.IndexOf(retention, _s.HistoryRetentionDays)), 160,
+                                      i => _s.HistoryRetentionDays = retention[i]), ""));
+        var used = new Label { AutoSize = true, ForeColor = Theme.TextDim, Tag = "dim", Text = Fmt.Bytes(_host.HistorySizeBytes), Margin = new Padding(8, 7, 0, 0) };
+        var delete = new PillButton("Delete…", async () =>
+        {
+            if (MessageBox.Show(this, "Delete all saved history? The graphs keep what is in memory until PC Vitals restarts.", "PC Vitals",
+                                MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+            try
+            {
+                await _host.DeleteHistoryAsync();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "Couldn't delete everything: " + ex.Message, "PC Vitals", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            used.Text = Fmt.Bytes(_host.HistorySizeBytes);
+        });
+        p.Controls.Add(new Card("Saved history", HistoryArchive.DefaultDir, new AccessoryRow(used,
+            new PillButton("Export…", ExportHistory),
+            new PillButton("Open folder", () =>
+            {
+                Directory.CreateDirectory(HistoryArchive.DefaultDir);
+                Process.Start(new ProcessStartInfo(HistoryArchive.DefaultDir) { UseShellExecute = true });
+            }),
+            delete), ""));
+
         p.Controls.Add(Section("Reset"));
         p.Controls.Add(new Card("Reset all settings", "Restores the default taskbar layout, alerts and appearance.", new PillButton("Reset…", () =>
         {
@@ -628,7 +663,7 @@ sealed class SettingsForm : Form
         p.Controls.Add(new Card("Settings and logs", dir, new AccessoryRow(
             new PillButton("Open folder", () => Process.Start(new ProcessStartInfo(dir) { UseShellExecute = true })),
             new PillButton("Save sensor report…", SaveReport)), ""));
-        p.Controls.Add(new Card("Export history", "One-minute averages of CPU, GPU, memory, power, network and drive readings for up to the last 24 hours, as a CSV file for Excel or other tools.",
+        p.Controls.Add(new Card("Export history", "CPU, GPU, memory, power, network, drive and favourite sensor readings as a CSV file for Excel or other tools: the last 24 hours, or everything saved when history is on (General).",
             new PillButton("Export CSV…", ExportHistory), ""));
 
         p.Controls.Add(Section("Credits"));
@@ -645,6 +680,12 @@ sealed class SettingsForm : Form
 
     void ExportHistory()
     {
+        if (_host.Archive is { } archive)
+        {
+            ExportDialog.Show(this, archive, _host);
+            return;
+        }
+        // History isn't saved: export what's in memory (the last 24 hours).
         using var dialog = new SaveFileDialog
         {
             FileName = $"PC Vitals history {DateTime.Now:yyyy-MM-dd HHmm}.csv",
