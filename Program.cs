@@ -3,6 +3,7 @@ using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
+using LibreHardwareMonitor.Hardware;
 
 namespace PCVitals;
 
@@ -461,13 +462,26 @@ static class Program
         Directory.CreateDirectory(dir);
         using var hw = new HardwareService { DetailedMode = true };
         hw.EnableDeferredGroups();
+        var settings = new AppSettings();
+
+        // Show a pinned sensor and a couple of favourites, as a user would set them up.
+        var first = hw.UpdateOnce();
+        var pinned = PreviewSensor(first, SensorType.Temperature, "Hot Spot", "Memory Junction", "Composite", "Temperature");
+        if (pinned != null) settings.PinSensor(pinned.Key, "HOT SPOT");
+        foreach (var fav in new[]
+                 {
+                     PreviewSensor(first, SensorType.Temperature, "CCD1", "Tctl"), PreviewSensor(first, SensorType.Fan, "CPU", "Fan"),
+                     PreviewSensor(first, SensorType.Power, "Package"),
+                 })
+            if (fav != null) settings.UpdateSensor(fav.Id, p => p.Favorite = true);
+        hw.TrackedSensors = settings.TrackedSensors(first);
+
         for (int i = 0; i < 40; i++)
         {
             hw.UpdateOnce();
             Thread.Sleep(250);
         }
         var snap = hw.UpdateOnce();
-        var settings = new AppSettings();
         int dpi = 144;
         float scale = dpi / 96f;
 
@@ -475,7 +489,7 @@ static class Program
         foreach (var light in new[] { false, true })
         {
             var views = settings.WidgetItems.Where(i => i.Enabled || i.Kind is WidgetKind.Power)
-                .Select(i => Vitals.Build(i.Kind, i.Label, snap)).Where(v => v != null).Select(v => v!).ToList();
+                .Select(i => Vitals.ForItem(i, snap, settings)).Where(v => v != null).Select(v => v!).ToList();
             using var strip = TaskbarWidget.RenderStrip(views, (int)(48 * scale), scale, light, true, 0, out _);
             using var bmp = new Bitmap(strip.Width + 40, strip.Height);
             using (var g = Graphics.FromImage(bmp))
@@ -489,6 +503,7 @@ static class Program
         // Hover cards for CPU and GPU side by side.
         var cards = new[] { WidgetKind.Cpu, WidgetKind.Gpu, WidgetKind.Memory }
             .Select(k => Vitals.Build(k, null, snap)).Where(v => v != null).Select(v => v!).ToList();
+        if (pinned != null) cards.Add(Vitals.ForSensor(snap, pinned.Key, null, settings));
         var sizes = cards.Select(c => HoverCard.Measure(c, dpi)).ToList();
         int gap = 24;
         using (var bmp = new Bitmap(sizes.Sum(s => s.Width) + gap * (cards.Count + 1), sizes.Max(s => s.Height) + gap * 2))
@@ -563,6 +578,16 @@ static class Program
             form.Close();
         }
         return 0;
+    }
+
+    /// <summary>The first sensor of a type whose name contains one of <paramref name="names"/> (in that order of preference).</summary>
+    static SensorEntry? PreviewSensor(Snapshot snap, SensorType type, params string[] names)
+    {
+        foreach (var name in names)
+            if (snap.Catalog.All.FirstOrDefault(e => e.Sensor.Type == type && e.Sensor.Value > 0 &&
+                                                     e.Sensor.Name.Contains(name, StringComparison.OrdinalIgnoreCase)) is { } found)
+                return found;
+        return null;
     }
 
     sealed class PreviewHost : ISettingsHost

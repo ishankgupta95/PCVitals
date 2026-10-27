@@ -11,6 +11,11 @@ sealed class DashboardForm : Form
     public bool Pinned { get; private set; }
     public event Action? RestartAsAdminRequested;
     public event Action? SettingsRequested;
+    /// <summary>The user changed a sensor (favourite, rename, hide, pin) from the dashboard.</summary>
+    public event Action? SensorsChanged;
+    public event Action<string>? ResetMinMaxRequested;
+    /// <summary>True while the dashboard shows its own dialog, so losing focus to it doesn't hide the flyout.</summary>
+    public bool HoldOpen { get; set; }
 
     public DashboardForm(AppSettings settings, bool isAdmin)
     {
@@ -32,6 +37,8 @@ sealed class DashboardForm : Form
         };
         _view.RestartAsAdminRequested += () => RestartAsAdminRequested?.Invoke();
         _view.SettingsRequested += () => SettingsRequested?.Invoke();
+        _view.SensorsChanged += () => SensorsChanged?.Invoke();
+        _view.ResetMinMaxRequested += id => ResetMinMaxRequested?.Invoke(id);
         Controls.Add(_view);
     }
 
@@ -57,7 +64,7 @@ sealed class DashboardForm : Form
     protected override void OnDeactivate(EventArgs e)
     {
         base.OnDeactivate(e);
-        if (Pinned || !Visible) return;
+        if (Pinned || HoldOpen || !Visible) return;
         Hide();
         LastAutoHidden = DateTime.Now;
     }
@@ -105,15 +112,15 @@ sealed class DashboardForm : Form
     }
 
     /// <summary>Switches the open dashboard to an item's page; false if it was already showing it.</summary>
-    public bool SwitchTo(WidgetKind page) => _view.ShowPage(page);
+    public bool SwitchTo(WidgetKind page, string? pageKey = null) => _view.ShowPage(page, pageKey);
 
     /// <summary>
     /// Shows the dashboard centred on the display containing <paramref name="anchor"/>, on the page for
     /// <paramref name="page"/> if given.
     /// </summary>
-    public void ShowNear(Point anchor, WidgetKind? page = null)
+    public void ShowNear(Point anchor, WidgetKind? page = null, string? pageKey = null)
     {
-        _view.ShowPage(page);
+        _view.ShowPage(page, pageKey);
         Bounds = ComputeBounds(anchor);
         Show();
         // The window may have picked up a new DPI when it landed on another monitor.

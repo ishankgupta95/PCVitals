@@ -35,6 +35,8 @@ public enum WidgetKind
     Board,
     Disk,
     Battery,
+    /// <summary>Any one sensor the user picked (<see cref="WidgetItem.Sensor"/>); there can be several.</summary>
+    Sensor,
 }
 
 public enum WidgetPosition
@@ -49,6 +51,8 @@ public sealed class WidgetItem
     public bool Enabled { get; set; }
     /// <summary>Text shown above the value; empty hides the label.</summary>
     public string Label { get; set; } = "";
+    /// <summary>For <see cref="WidgetKind.Sensor"/> items: the sensor shown.</summary>
+    public SensorKey? Sensor { get; set; }
 }
 
 /// <summary>The user's preferences for one sensor (see <see cref="AppSettings.Sensors"/>).</summary>
@@ -87,6 +91,8 @@ public sealed class AppSettings
     public string? PrimaryGpuId { get; set; }
     public int IntervalMs { get; set; } = 1000;
     public bool ShowAdvancedSensors { get; set; }
+    /// <summary>List sensors the user hid in the dashboard (dimmed) instead of leaving them out.</summary>
+    public bool ShowHiddenSensors { get; set; }
     public bool Fahrenheit { get; set; }
     /// <summary>The one-time "install PawnIO" notification has been shown.</summary>
     public bool PawnIoNoticeShown { get; set; }
@@ -128,6 +134,52 @@ public sealed class AppSettings
         new() { Kind = WidgetKind.Battery, Enabled = false, Label = "BAT" },
     };
 
+    /// <summary>The name to show for a sensor: the user's rename, else <paramref name="original"/>.</summary>
+    public string SensorName(string sensorId, string original) =>
+        Sensors.TryGetValue(sensorId, out var p) && !string.IsNullOrWhiteSpace(p.DisplayName) ? p.DisplayName! : original;
+
+    public bool IsFavorite(string sensorId) => Sensors.TryGetValue(sensorId, out var p) && p.Favorite;
+
+    public bool IsHidden(string sensorId) => Sensors.TryGetValue(sensorId, out var p) && p.Hidden;
+
+    /// <summary>Changes a sensor's preferences, dropping the entry once nothing is set.</summary>
+    public void UpdateSensor(string sensorId, Action<SensorPref> change)
+    {
+        if (!Sensors.TryGetValue(sensorId, out var p)) p = new SensorPref();
+        change(p);
+        if (string.IsNullOrWhiteSpace(p.DisplayName)) p.DisplayName = null;
+        if (p.DisplayName == null && !p.Favorite && !p.Hidden) Sensors.Remove(sensorId);
+        else Sensors[sensorId] = p;
+    }
+
+    public bool IsPinned(string sensorId) => WidgetItems.Any(i => i.Kind == WidgetKind.Sensor && i.Sensor?.Id == sensorId);
+
+    /// <summary>Adds a sensor to the taskbar (at the end, switched on) unless it is already there.</summary>
+    public WidgetItem PinSensor(SensorKey key, string label)
+    {
+        var existing = WidgetItems.FirstOrDefault(i => i.Kind == WidgetKind.Sensor && i.Sensor?.Id == key.Id);
+        if (existing != null)
+        {
+            existing.Enabled = true;
+            return existing;
+        }
+        var item = new WidgetItem { Kind = WidgetKind.Sensor, Enabled = true, Label = label, Sensor = key };
+        WidgetItems.Add(item);
+        return item;
+    }
+
+    public void UnpinSensor(string sensorId) => WidgetItems.RemoveAll(i => i.Kind == WidgetKind.Sensor && i.Sensor?.Id == sensorId);
+
+    /// <summary>Sensors to keep history for: pinned (and switched on) and favourites, by key.</summary>
+    public List<SensorKey> TrackedSensors(Snapshot? snap)
+    {
+        var keys = WidgetItems.Where(i => i.Kind == WidgetKind.Sensor && i.Enabled && i.Sensor != null).Select(i => i.Sensor!).ToList();
+        if (snap != null)
+            foreach (var (id, pref) in Sensors)
+                if (pref.Favorite && keys.All(k => k.Id != id) && snap.Catalog[id] is { } e) keys.Add(e.Key);
+        return keys;
+    }
+
     public static AppSettings CreateDefault() => new() { Version = CurrentVersion };
 
     public static AppSettings Load() => LoadFrom(FilePath);
@@ -164,7 +216,11 @@ public sealed class AppSettings
         // Keep the item list complete if new kinds were added in an update.
         foreach (var def in DefaultWidgetItems())
             if (settings.WidgetItems.All(i => i.Kind != def.Kind)) settings.WidgetItems.Add(new WidgetItem { Kind = def.Kind, Label = def.Label });
-        settings.WidgetItems = settings.WidgetItems.GroupBy(i => i.Kind).Select(g => g.First()).ToList();
+        // One item per built-in kind; sensor items are kept once per sensor, and dropped if they lost their sensor.
+        settings.WidgetItems = settings.WidgetItems
+            .Where(i => i.Kind != WidgetKind.Sensor || i.Sensor != null)
+            .GroupBy(i => i.Kind == WidgetKind.Sensor ? "sensor:" + i.Sensor!.Id : i.Kind.ToString())
+            .Select(g => g.First()).ToList();
         return settings;
     }
 

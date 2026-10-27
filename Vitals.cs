@@ -31,6 +31,10 @@ sealed class ItemView
     public float? HistoryMax { get; init; }
     public string HistoryCaption { get; init; } = "Last 90 seconds";
     public string? TileSub { get; init; }
+    /// <summary>Sensor items: the device the sensor belongs to (taskbar accent colour).</summary>
+    public HardwareType? HardwareType { get; init; }
+    /// <summary>Dashboard page to open when the item is clicked, when it isn't implied by <see cref="Kind"/>.</summary>
+    public string? Page { get; init; }
 
     public List<DetailRow> Rows { get; } = new();
 }
@@ -48,7 +52,78 @@ static class Vitals
         WidgetKind.Board => "Motherboard / chipset",
         WidgetKind.Disk => "Storage",
         WidgetKind.Battery => "Battery",
+        WidgetKind.Sensor => "Sensor",
         _ => k.ToString(),
+    };
+
+    /// <summary>The view for a taskbar item: a built-in kind, or a sensor the user picked.</summary>
+    public static ItemView? ForItem(WidgetItem item, Snapshot snap, AppSettings settings) =>
+        item.Kind == WidgetKind.Sensor
+            ? item.Sensor is { } key ? ForSensor(snap, key, item.Label, settings) : null
+            : Build(item.Kind, item.Label, snap);
+
+    /// <summary>
+    /// One sensor as a taskbar item / hover card: its value, session min and max, and history when
+    /// it is tracked. A sensor that disappeared (device removed) still shows, as "--".
+    /// </summary>
+    public static ItemView ForSensor(Snapshot snap, SensorKey key, string? label, AppSettings? settings = null)
+    {
+        var entry = snap.FindSensor(key);
+        string Named(string id, string fallback) => settings?.SensorName(id, fallback) ?? fallback;
+        var templates = SensorFormat.Templates(key.SensorType);
+        if (entry == null)
+        {
+            var missing = new ItemView
+            {
+                Kind = WidgetKind.Sensor, Title = Named(key.Id, key.SensorName), Accent = Theme.ForHardware(key.HardwareType), Label = label,
+                HardwareType = key.HardwareType, Device = key.HardwareName, DeviceShort = HardwareService.ShortName(key.HardwareName),
+                Primary = "--", PrimaryTemplates = templates,
+                HistoryCaption = "No readings",
+            };
+            missing.Rows.Add(new("Status", "Not available", Theme.Warn));
+            missing.Rows.Add(new("Why", "The device may be disconnected or asleep"));
+            return missing;
+        }
+
+        var (hw, s) = (entry.Hardware, entry.Sensor);
+        var name = Named(s.Id, s.Name);
+        bool temp = s.Type == SensorType.Temperature;
+        var v = new ItemView
+        {
+            Kind = WidgetKind.Sensor, Title = name, Accent = Theme.ForHardware(hw.Type), Label = label,
+            HardwareType = hw.Type, Page = PageFor(hw),
+            Device = hw.Name, DeviceShort = HardwareService.ShortName(hw.Name),
+            Primary = SensorFormat.Short(s.Type, s.Value), PrimaryTemp = temp ? s.Value : null, PrimaryTemplates = templates,
+            Line1 = s.Max is { } max ? "max " + SensorFormat.Short(s.Type, max) : null,
+            Line2 = s.Min is { } min ? "min " + SensorFormat.Short(s.Type, min) : null,
+            LineTemplates = templates.Select(t => "max " + t).ToArray(),
+            History = snap.History.TryGetValue(s.Id, out var h) ? h : null,
+            HistoryMax = SensorFormat.IsPercent(s.Type) || temp ? 100 : null,
+            HistoryCaption = $"{name} · last 90 seconds",
+            TileSub = HardwareService.ShortName(hw.Name),
+        };
+        Color? Tint(float? x) => temp ? Theme.TempColor(x) : null;
+        v.Rows.Add(new("Now", Fmt.Sensor(s.Type, s.Value), Tint(s.Value)));
+        v.Rows.Add(new("Minimum", Fmt.Sensor(s.Type, s.Min), Tint(s.Min)));
+        v.Rows.Add(new("Maximum", Fmt.Sensor(s.Type, s.Max), Tint(s.Max)));
+        v.Rows.Add(new("Average (this session)", Fmt.Sensor(s.Type, s.Avg)));
+        if (name != s.Name) v.Rows.Add(new("Sensor", s.Name));
+        return v;
+    }
+
+    /// <summary>The dashboard page that lists a device's sensors.</summary>
+    public static string PageFor(HardwareReading hw) => hw.Type switch
+    {
+        HardwareType.Cpu => "cpu",
+        HardwareType.GpuNvidia or HardwareType.GpuAmd
+            or HardwareType.GpuIntel => "gpu:" + hw.Id,
+        HardwareType.Memory => "memory",
+        HardwareType.Storage => "disk:" + hw.Id,
+        HardwareType.Network => "network",
+        HardwareType.Motherboard or HardwareType.SuperIO
+            or HardwareType.EmbeddedController => "board",
+        HardwareType.Battery => "battery",
+        _ => "hw:" + hw.Id,
     };
 
     public static ItemView? Build(WidgetKind kind, string? label, Snapshot snap)
@@ -316,4 +391,66 @@ static class Vitals
     public static string Watts(float? v) => v is { } x ? $"{x:0} W" : "-- W";
     static string Watts1(float? v) => v is { } x ? $"{x:0.0} W" : "—";
     static string Clock(float? mhz) => mhz is { } x ? (x >= 1000 ? $"{x / 1000:0.00} GHz" : $"{x:0} MHz") : "-- GHz";
+}
+
+/// <summary>Short, unit-aware values for sensor items on the taskbar, and the widest text each type can take.</summary>
+static class SensorFormat
+{
+    public static bool IsPercent(SensorType t) => t is SensorType.Load or SensorType.Control or SensorType.Level or SensorType.Humidity;
+
+    public static string Short(SensorType t, float? value)
+    {
+        if (value is not { } x) return "--";
+        return t switch
+        {
+            SensorType.Temperature => Fmt.Temp(x),
+            _ when IsPercent(t) => $"{x:0}%",
+            SensorType.Power => x < 100 ? $"{x:0.0} W" : $"{x:0} W",
+            SensorType.Fan => $"{x:0} RPM",
+            SensorType.Clock => x >= 1000 ? $"{x / 1000:0.00} GHz" : $"{x:0} MHz",
+            SensorType.Voltage => $"{x:0.000} V",
+            SensorType.Current => $"{x:0.0} A",
+            SensorType.Throughput => Fmt.Rate(x),
+            SensorType.Data => $"{x:0.0} GB",
+            SensorType.SmallData => x >= 1024 ? $"{x / 1024:0.0} GB" : $"{x:0} MB",
+            SensorType.TimeSpan => Fmt.Duration(x),
+            SensorType.Frequency => $"{x:0} Hz",
+            _ => Fmt.Sensor(t, x),
+        };
+    }
+
+    /// <summary>Strings at least as wide as any value <see cref="Short"/> gives for the type, so items don't jiggle.</summary>
+    public static string[] Templates(SensorType t) => t switch
+    {
+        SensorType.Temperature => new[] { "100°C" },
+        _ when IsPercent(t) => new[] { "100%" },
+        SensorType.Power => new[] { "99.9 W", "999 W" },
+        SensorType.Fan => new[] { "9999 RPM" },
+        SensorType.Clock => new[] { "9.99 GHz", "999 MHz" },
+        SensorType.Voltage => new[] { "1.234 V" },
+        SensorType.Current => new[] { "99.9 A" },
+        SensorType.Throughput => new[] { "999.9 KB/s" },
+        SensorType.Data => new[] { "999.9 GB" },
+        SensorType.SmallData => new[] { "99.9 GB", "999 MB" },
+        SensorType.TimeSpan => new[] { "10h 59m" },
+        SensorType.Frequency => new[] { "999 Hz" },
+        _ => new[] { "9999" },
+    };
+
+    /// <summary>A short default taskbar label for a sensor: its name, cut at a word to 8 characters.</summary>
+    public static string DefaultLabel(string sensorName)
+    {
+        var words = System.Text.RegularExpressions.Regex.Replace(sensorName, @"\(.*?\)|#", " ")
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var label = "";
+        foreach (var w in words)
+        {
+            var next = label.Length == 0 ? w : label + " " + w;
+            if (next.Length > 8) break;
+            label = next;
+        }
+        if (label.Length > 0) return label;
+        var first = words.FirstOrDefault() ?? sensorName;
+        return first.Length > 8 ? first[..8] : first;
+    }
 }

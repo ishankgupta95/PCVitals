@@ -119,4 +119,22 @@ public sealed record Snapshot(
 
     /// <summary>Every sensor in this snapshot by id; built on first use.</summary>
     public SensorCatalog Catalog => _catalog ??= new SensorCatalog(AllHardware);
+
+    /// <summary>
+    /// The sensor a saved key refers to. Looks in the key's own device first (cheap enough for every
+    /// refresh) and only falls back to <see cref="SensorCatalog.Find"/> when that fails.
+    /// </summary>
+    public SensorEntry? FindSensor(SensorKey key)
+    {
+        var hwId = SensorKey.HardwarePart(key.Id);
+        foreach (var hw in AllHardware)
+        {
+            if (hw.Id != hwId) continue;
+            foreach (var s in hw.Sensors)
+                if (s.Id == key.Id && s.Type == key.SensorType && s.Name.Equals(key.SensorName, StringComparison.OrdinalIgnoreCase))
+                    return new SensorEntry(hw, s);
+            break;
+        }
+        return Catalog.Find(key);
+    }
 }

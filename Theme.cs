@@ -124,6 +124,7 @@ static class Theme
             WidgetKind.Power => d.Power,
             WidgetKind.Disk => d.Storage,
             WidgetKind.Battery => d.Good,
+            WidgetKind.Sensor when v.HardwareType is { } hw => ForHardware(hw, d),
             _ => d.Board,
         };
         return OnTaskbar(c, lightTaskbar);
@@ -137,16 +138,18 @@ static class Theme
         _ => Hot,
     };
 
-    public static Color ForHardware(HardwareType t) => t switch
+    public static Color ForHardware(HardwareType t) => ForHardware(t, _p);
+
+    public static Color ForHardware(HardwareType t, Palette p) => t switch
     {
-        HardwareType.Cpu => Cpu,
-        HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel => Gpu,
-        HardwareType.Memory => Ram,
-        HardwareType.Motherboard or HardwareType.SuperIO or HardwareType.EmbeddedController => Board,
-        HardwareType.Storage => Storage,
-        HardwareType.Network => Net,
-        HardwareType.Psu or HardwareType.Battery or HardwareType.PowerMonitor => Power,
-        _ => Other,
+        HardwareType.Cpu => p.Cpu,
+        HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel => p.Gpu,
+        HardwareType.Memory => p.Ram,
+        HardwareType.Motherboard or HardwareType.SuperIO or HardwareType.EmbeddedController => p.Board,
+        HardwareType.Storage => p.Storage,
+        HardwareType.Network => p.Net,
+        HardwareType.Psu or HardwareType.Battery or HardwareType.PowerMonitor => p.Power,
+        _ => p.Other,
     };
 
     public static string Badge(HardwareType t) => t switch

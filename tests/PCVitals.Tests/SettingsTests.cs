@@ -20,7 +20,7 @@ public sealed class SettingsTests : IDisposable
         Assert.Equal(ThemeMode.System, s.ColorTheme);
         Assert.Equal(new[] { WidgetKind.Cpu, WidgetKind.Gpu, WidgetKind.Memory, WidgetKind.Network },
                      s.WidgetItems.Where(i => i.Enabled).Select(i => i.Kind));
-        Assert.Equal(Enum.GetValues<WidgetKind>().Length, s.WidgetItems.Count);
+        Assert.Equal(AppSettings.DefaultWidgetItems().Count, s.WidgetItems.Count);
     }
 
     [Fact]
@@ -56,7 +56,7 @@ public sealed class SettingsTests : IDisposable
         Assert.Equal(WidgetKind.Memory, s.WidgetItems[0].Kind);
         Assert.Equal("RAM", s.WidgetItems[0].Label); // user's order and label kept
         Assert.Single(s.WidgetItems, i => i.Kind == WidgetKind.Memory);
-        Assert.Equal(Enum.GetValues<WidgetKind>().Length, s.WidgetItems.Count);
+        Assert.Equal(AppSettings.DefaultWidgetItems().Count, s.WidgetItems.Count);
         Assert.False(s.WidgetItems.Single(i => i.Kind == WidgetKind.Battery).Enabled); // new kinds start off
     }
 

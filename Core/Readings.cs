@@ -6,7 +6,8 @@ namespace PCVitals.Core;
 /// Stable identifier from LibreHardwareMonitor (e.g. <c>/amdcpu/0/temperature/2</c>), or one under
 /// <c>/pcvitals/...</c> for readings PC Vitals adds itself.
 /// </param>
-public sealed record SensorReading(string Id, string Name, SensorType Type, float? Value, float? Min, float? Max);
+/// <param name="Avg">Mean of the readings since PC Vitals started or the sensor's min/max were last reset.</param>
+public sealed record SensorReading(string Id, string Name, SensorType Type, float? Value, float? Min, float? Max, float? Avg = null);
 
 public sealed record HardwareReading(string Id, string Name, HardwareType Type, IReadOnlyList<SensorReading> Sensors)
 {
@@ -48,18 +49,24 @@ public sealed record SensorKey(string Id, HardwareType HardwareType, string Hard
         hwName.Equals(HardwareName, StringComparison.OrdinalIgnoreCase) &&
         name.Equals(SensorName, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>"/amdcpu/0/temperature/2" → "/amdcpu/0": the hardware part of a sensor id.</summary>
+    /// <summary>
+    /// "/amdcpu/0/temperature/2" → "/amdcpu/0": the id of the device a sensor belongs to (also for
+    /// PC Vitals' own "/pcvitals/&lt;device id&gt;/..." readings).
+    /// </summary>
     public static string HardwarePart(string sensorId)
     {
         // Sensor ids are "<hardware id>/<sensor type>/<index>".
         int last = sensorId.LastIndexOf('/');
         int type = last > 0 ? sensorId.LastIndexOf('/', last - 1) : -1;
-        return type > 0 ? sensorId[..type] : sensorId;
+        var hw = type > 0 ? sensorId[..type] : sensorId;
+        return hw.StartsWith(SyntheticIds.Prefix + "/", StringComparison.Ordinal) ? hw[SyntheticIds.Prefix.Length..] : hw;
     }
 }
 
 /// <summary>Ids for readings PC Vitals adds itself, so they can be referred to like any other sensor.</summary>
 public static class SyntheticIds
 {
-    public static string For(string hardwareId, string sensor) => "/pcvitals" + hardwareId + "/" + sensor;
+    public const string Prefix = "/pcvitals";
+
+    public static string For(string hardwareId, string sensor) => Prefix + hardwareId + "/" + sensor;
 }

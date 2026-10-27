@@ -54,6 +54,7 @@ sealed class DashboardView : Control
     readonly bool _isAdmin;
     readonly ProcessStats _procs = new();
     readonly List<(Rectangle Rect, Action Action, string Name)> _hits = new();
+    readonly List<(Rectangle Rect, HardwareReading Hardware, SensorReading Sensor)> _sensorRows = new();
 
     Snapshot? _snap;
     float _scroll;
@@ -71,6 +72,8 @@ sealed class DashboardView : Control
     public event Action? PinToggled;
     public event Action? RestartAsAdminRequested;
     public event Action? SettingsRequested;
+    public event Action? SensorsChanged;
+    public event Action<string>? ResetMinMaxRequested;
 
     /// <summary>Supplies long history for the big graph: (series key, sample count) → samples.</summary>
     public Func<string, int, float[]>? HistoryProvider { get; set; }
@@ -112,10 +115,10 @@ sealed class DashboardView : Control
     internal void SampleProcessesNow() => _procs.Sample(includeGpu: true);
 
     /// <summary>Opens the page for a taskbar item (or the overview). Returns true if the page changed.</summary>
-    public bool ShowPage(WidgetKind? kind)
+    public bool ShowPage(WidgetKind? kind, string? pageKey = null)
     {
         var s = _snap?.Summary;
-        var key = kind switch
+        var key = pageKey ?? kind switch
         {
             WidgetKind.Cpu => "cpu",
             WidgetKind.Gpu when s?.Gpu != null => "gpu:" + s.Gpu.Id,
@@ -285,6 +288,7 @@ sealed class DashboardView : Control
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.Clear(Theme.Bg);
         _hits.Clear();
+        _sensorRows.Clear();
         _plot = Rectangle.Empty;
 
         int w = ClientSize.Width, h = ClientSize.Height, headerH = S(58);
@@ -448,6 +452,8 @@ sealed class DashboardView : Control
         int rows = (tiles.Count + cols - 1) / cols;
         y += rows * tileH + Math.Max(0, rows - 1) * gap + S(18);
 
+        y = DrawFavorites(g, x, y, w);
+
         // System summary card.
         var info = new List<(string, string)> { ("Windows", OsName()) };
         if (s.CpuName != null) info.Add(("Processor", s.CpuName));
@@ -461,6 +467,40 @@ sealed class DashboardView : Control
 
         y = DrawProcesses(g, ProcessSort.Cpu, x, y, w, 5) + S(14);
         return y + S(20);
+    }
+
+    /// <summary>Favourite sensors with live values; nothing when there are none.</summary>
+    int DrawFavorites(Graphics g, int x, int y, int w)
+    {
+        if (!_settings.Sensors.Values.Any(p => p.Favorite)) return y;
+        var favorites = _snap!.Catalog.All.Where(e => _settings.IsFavorite(e.Id)).ToList();
+        if (favorites.Count == 0) return y;
+
+        int rowH = S(26);
+        var card = new Rectangle(x, y, w, S(44) + favorites.Count * rowH + S(8));
+        if (card.Bottom < _viewport.Top || card.Top > _viewport.Bottom) return card.Bottom + S(14);
+        Gfx.FillRounded(g, card, S(10), Theme.Surface);
+        Gfx.Text(g, "FAVOURITES", _f.Label, Theme.TextFaint, new Rectangle(x + S(16), y + S(14), w, S(16)));
+        int ry = y + S(40);
+        foreach (var e in favorites)
+        {
+            var row = new Rectangle(x + S(8), ry, w - S(16), rowH);
+            if (row.Contains(_mouse)) Gfx.FillRounded(g, row, S(5), Theme.SurfaceHover);
+            var name = _settings.SensorName(e.Id, e.Sensor.Name);
+            var value = Fmt.Sensor(e.Sensor.Type, e.Sensor.Value);
+            using (var dot = new SolidBrush(Theme.ForHardware(e.Hardware.Type))) g.FillEllipse(dot, x + S(16), ry + rowH / 2 - S(3), S(7), S(7));
+            Gfx.Text(g, name, _f.Body, Theme.Text, new Rectangle(x + S(30), ry, S(260), rowH), TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            Gfx.Text(g, HardwareService.ShortName(e.Hardware.Name), _f.Small, Theme.TextFaint, new Rectangle(x + S(296), ry, w - S(420), rowH),
+                     TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            Gfx.Text(g, value, _f.BodyBold, e.Sensor.Type == SensorType.Temperature ? Theme.TempColor(e.Sensor.Value) : Theme.Text,
+                     new Rectangle(x + w - S(130), ry, S(114), rowH), TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+            var (hw, sensor, page) = (e.Hardware, e.Sensor, Vitals.PageFor(e.Hardware));
+            AddHit(row, $"{name} {value}, open {HardwareService.ShortName(hw.Name)}", () => Navigate(page));
+            var visible = Rectangle.Intersect(row, _viewport);
+            if (!visible.IsEmpty) _sensorRows.Add((visible, hw, sensor));
+            ry += rowH;
+        }
+        return card.Bottom + S(14);
     }
 
     static string OsName()
@@ -572,6 +612,21 @@ sealed class DashboardView : Control
             _settings.Save();
             Invalidate();
         });
+        int hiddenCount = page.Readings.SelectMany(h => h.Sensors).Count(s => _settings.IsHidden(s.Id));
+        if (hiddenCount > 0 || _settings.ShowHiddenSensors)
+        {
+            var hiddenToggle = _settings.ShowHiddenSensors ? "Leave out hidden" : $"Show hidden ({hiddenCount})";
+            int hw2 = Gfx.TextWidth(g, hiddenToggle, _f.Small);
+            var hr = new Rectangle(tr.Left - hw2 - S(20), tr.Top, hw2 + S(14), tr.Height);
+            if (hr.Contains(_mouse)) Gfx.FillRounded(g, hr, S(6), Theme.SurfaceHover);
+            Gfx.Text(g, hiddenToggle, _f.Small, Theme.Cpu, hr, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            AddHit(hr, _settings.ShowHiddenSensors ? "Leave out hidden sensors" : $"Show {hiddenCount} hidden sensors", () =>
+            {
+                _settings.ShowHiddenSensors = !_settings.ShowHiddenSensors;
+                _settings.Save();
+                Invalidate();
+            });
+        }
         y += S(24);
         foreach (var hw in page.Readings) y = DrawSection(g, hw, x, y, w) + S(8);
 
@@ -896,6 +951,7 @@ sealed class DashboardView : Control
         var sensors = (_settings.ShowAdvancedSensors ? hw.Sensors : hw.Sensors.Where(s => !IsAdvanced(s)))
             // Per-thread load is shown as the bar graph above, not 16+ rows.
             .Where(s => !(hw.Type == HardwareType.Cpu && s.Type == SensorType.Load && s.Name.StartsWith("CPU Core #", StringComparison.OrdinalIgnoreCase)))
+            .Where(s => _settings.ShowHiddenSensors || !_settings.IsHidden(s.Id))
             .ToList();
         if (sensors.Count == 0) return y - S(8);
         var groups = sensors
@@ -934,10 +990,10 @@ sealed class DashboardView : Control
                  TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
         if (collapsed) return card.Bottom;
 
-        // Columns: name | min | max | now
+        // Columns: name | min | avg | max | now
         int valueRight = x + w - S(14), valueW = S(96);
         int maxRight = valueRight - valueW - S(6), colW = S(62);
-        int minRight = maxRight - colW;
+        int avgRight = maxRight - colW, minRight = avgRight - colW;
         int nameX = x + S(16), nameW = minRight - colW - S(8) - nameX;
 
         int ry = y + headH;
@@ -950,6 +1006,7 @@ sealed class DashboardView : Control
             {
                 Gfx.Text(g, GroupName(group.Key).ToUpperInvariant(), _f.Label, Theme.TextFaint, new Rectangle(nameX, ry + S(8), nameW, S(16)));
                 Gfx.Text(g, "MIN", _f.Label, Theme.TextFaint, new Rectangle(minRight - colW, ry + S(8), colW, S(16)), TextFormatFlags.Right);
+                Gfx.Text(g, "AVG", _f.Label, Theme.TextFaint, new Rectangle(avgRight - colW, ry + S(8), colW, S(16)), TextFormatFlags.Right);
                 Gfx.Text(g, "MAX", _f.Label, Theme.TextFaint, new Rectangle(maxRight - colW, ry + S(8), colW, S(16)), TextFormatFlags.Right);
             }
             ry += groupH;
@@ -966,14 +1023,30 @@ sealed class DashboardView : Control
                         if (bar.Width > S(8)) Gfx.FillRounded(g, bar, S(5), Theme.WithAlpha(color, 26));
                     }
                     var valueColor = sensor.Type == SensorType.Temperature ? Theme.TempColor(sensor.Value) : Theme.Text;
-                    Gfx.Text(g, sensor.Name, _f.Body, Theme.TextDim, new Rectangle(nameX, ry, nameW, rowH),
-                             TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                    var name = _settings.SensorName(sensor.Id, sensor.Name);
+                    bool hidden = _settings.IsHidden(sensor.Id), favorite = _settings.IsFavorite(sensor.Id);
+                    int nx = nameX;
+                    if (favorite)
+                    {
+                        Gfx.Text(g, "★", _f.Small, Theme.Warn, new Rectangle(nx, ry, S(14), rowH), TextFormatFlags.VerticalCenter);
+                        nx += S(16);
+                    }
+                    var notes = (_settings.IsPinned(sensor.Id) ? "  · on taskbar" : "") + (hidden ? "  · hidden" : "");
+                    Gfx.Text(g, name + notes, _f.Body, hidden ? Theme.TextFaint : Theme.TextDim,
+                             new Rectangle(nx, ry, nameW - (nx - nameX), rowH), TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
                     Gfx.Text(g, Fmt.Compact(sensor.Type, sensor.Min), _f.Small, Theme.TextFaint,
                              new Rectangle(minRight - colW, ry, colW, rowH), TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+                    Gfx.Text(g, Fmt.Compact(sensor.Type, sensor.Avg), _f.Small, Theme.TextFaint,
+                             new Rectangle(avgRight - colW, ry, colW, rowH), TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
                     Gfx.Text(g, Fmt.Compact(sensor.Type, sensor.Max), _f.Small, Theme.TextFaint,
                              new Rectangle(maxRight - colW, ry, colW, rowH), TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
                     Gfx.Text(g, Fmt.Sensor(sensor.Type, sensor.Value), _f.BodyBold, valueColor,
                              new Rectangle(valueRight - valueW, ry, valueW, rowH), TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+                    var (rowHw, rowSensor) = (hw, sensor);
+                    AddHit(row, $"{name} {Fmt.Sensor(sensor.Type, sensor.Value)}{(favorite ? ", favourite" : "")}{(hidden ? ", hidden" : "")}: options",
+                           () => ShowSensorMenu(rowHw, rowSensor, RectangleToScreen(new Rectangle(row.Left, row.Bottom, 0, 0)).Location));
+                    var visible = Rectangle.Intersect(row, _viewport);
+                    if (!visible.IsEmpty) _sensorRows.Add((visible, hw, sensor));
                 }
                 ry += rowH;
             }
@@ -999,7 +1072,84 @@ sealed class DashboardView : Control
         return r.Right;
     }
 
-    static string GroupName(SensorType t) => t switch
+    // ---- Sensor options ---------------------------------------------------------------------
+
+    void ShowSensorMenu(HardwareReading hw, SensorReading sensor, Point screen)
+    {
+        var id = sensor.Id;
+        var name = _settings.SensorName(id, sensor.Name);
+        var menu = new ContextMenuStrip { Renderer = new DarkMenuRenderer(), ShowImageMargin = false, ShowCheckMargin = true };
+        void Changed()
+        {
+            _settings.Save();
+            SensorsChanged?.Invoke();
+            Invalidate();
+        }
+        ToolStripMenuItem Item(string text, bool check, Action onClick)
+        {
+            var item = new ToolStripMenuItem(text) { Checked = check };
+            item.Click += (_, _) => onClick();
+            return item;
+        }
+
+        menu.Items.Add(new ToolStripLabel(name) { ForeColor = Theme.TextDim, Font = new Font(menu.Font, FontStyle.Bold) });
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(Item("Favourite", _settings.IsFavorite(id), () =>
+        {
+            _settings.UpdateSensor(id, p => p.Favorite = !p.Favorite);
+            Changed();
+        }));
+        menu.Items.Add(Item("Rename…", false, () => Rename(id, sensor.Name, name)));
+        menu.Items.Add(Item("Hide", _settings.IsHidden(id), () =>
+        {
+            _settings.UpdateSensor(id, p => p.Hidden = !p.Hidden);
+            Changed();
+        }));
+        bool pinned = _settings.IsPinned(id);
+        menu.Items.Add(Item("Show on the taskbar", pinned, () =>
+        {
+            if (pinned) _settings.UnpinSensor(id);
+            else _settings.PinSensor(SensorKey.For(hw, sensor), SensorFormat.DefaultLabel(name));
+            Changed();
+        }));
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(Item("Reset min, max and average", false, () => ResetMinMaxRequested?.Invoke(id)));
+
+        // The menu must not count as the flyout losing focus.
+        if (FindForm() is DashboardForm form)
+        {
+            form.HoldOpen = true;
+            menu.Closed += (_, _) => BeginInvoke(() => form.HoldOpen = false);
+        }
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
+        menu.Show(screen);
+    }
+
+    void Rename(string id, string original, string current)
+    {
+        var form = FindForm() as DashboardForm;
+        if (form != null) form.HoldOpen = true;
+        try
+        {
+            var text = TextPrompt.Ask(FindForm(), "Rename sensor", $"Shown everywhere instead of \"{original}\". Leave empty to use the original name.",
+                                      current == original ? "" : current, original);
+            if (text == null) return;
+            _settings.UpdateSensor(id, p => p.DisplayName = text.Trim().Length == 0 || text.Trim() == original ? null : text.Trim());
+            _settings.Save();
+            SensorsChanged?.Invoke();
+            Invalidate();
+        }
+        finally
+        {
+            if (form != null)
+            {
+                form.HoldOpen = false;
+                form.Activate();
+            }
+        }
+    }
+
+    internal static string GroupName(SensorType t) => t switch
     {
         SensorType.Temperature => "Temperatures",
         SensorType.Load => "Usage",
@@ -1169,7 +1319,10 @@ sealed class DashboardView : Control
             e.Handled = true;
             return;
         }
-        if (e.KeyCode is Keys.Enter or Keys.Space && _keyboardFocus && _focus >= 0 && _focus < _hits.Count)
+        // The menu key (or Shift+F10) on a focused sensor row opens its options, like a right-click.
+        bool menuKey = e.KeyCode == Keys.Apps || (e.Shift && e.KeyCode == Keys.F10);
+        if ((e.KeyCode is Keys.Enter or Keys.Space || menuKey) && _keyboardFocus && _focus >= 0 && _focus < _hits.Count &&
+            (!menuKey || _sensorRows.Any(r => r.Rect == _hits[_focus].Rect)))
         {
             _hits[_focus].Action();
             e.Handled = true;
@@ -1197,6 +1350,16 @@ sealed class DashboardView : Control
         base.OnMouseDown(e);
         Focus();
         _keyboardFocus = false; // the focus ring is for keyboard users; hide it once the mouse is used
+        if (e.Button == MouseButtons.Right)
+        {
+            foreach (var (rect, hw, sensor) in _sensorRows)
+                if (rect.Contains(e.Location))
+                {
+                    ShowSensorMenu(hw, sensor, Cursor.Position);
+                    break;
+                }
+            return;
+        }
         if (e.Button != MouseButtons.Left) return;
 
         if (!_thumb.IsEmpty && e.X >= ClientSize.Width - S(14) && e.Y >= _viewport.Top)

@@ -129,6 +129,105 @@ public sealed class HardwareService : IDisposable
     /// <summary>Wakes the poller early, e.g. after a setting changed.</summary>
     public void Poke() => _wake.Set();
 
+    // ---- Commands and tracked sensors -------------------------------------------------------
+
+    readonly System.Collections.Concurrent.ConcurrentQueue<Action<IComputer>> _commands = new();
+
+    /// <summary>
+    /// Runs <paramref name="command"/> on the poll thread at the start of the next poll (the library
+    /// isn't thread-safe), and wakes the poller so it happens promptly.
+    /// </summary>
+    public void Enqueue(Action<IComputer> command)
+    {
+        _commands.Enqueue(command);
+        Poke();
+    }
+
+    /// <summary>Clears a sensor's min, max and session average.</summary>
+    public void ResetMinMax(string sensorId) => Enqueue(computer =>
+    {
+        _averages.Remove(sensorId);
+        if (sensorId.StartsWith("/pcvitals/", StringComparison.Ordinal))
+            _estimatedRange.Remove(SensorKey.HardwarePart(sensorId));
+        foreach (var sensor in AllSensors(computer.Hardware))
+        {
+            if (IdOf(sensor) != sensorId) continue;
+            sensor.ResetMin();
+            sensor.ResetMax();
+        }
+    });
+
+    static IEnumerable<ISensor> AllSensors(IEnumerable<IHardware> hardware)
+    {
+        foreach (var hw in hardware)
+        {
+            foreach (var s in hw.Sensors) yield return s;
+            foreach (var s in AllSensors(hw.SubHardware)) yield return s;
+        }
+    }
+
+    void RunCommands()
+    {
+        while (_commands.TryDequeue(out var command))
+        {
+            try { command(_computer); }
+            catch (Exception ex) { LogOnce("command:" + ex.GetType().Name, "Sensor command failed: " + ex); }
+        }
+    }
+
+    SensorKey[] _tracked = Array.Empty<SensorKey>();
+    readonly Dictionary<SensorKey, string> _trackedIds = new();
+    readonly HashSet<string> _trackedDevices = new();
+    long _trackedRetryTick;
+
+    /// <summary>
+    /// Sensors to keep history for and poll as often as the headline ones (pinned to the taskbar,
+    /// favourites). Settable from any thread.
+    /// </summary>
+    public IReadOnlyList<SensorKey> TrackedSensors
+    {
+        get => Volatile.Read(ref _tracked);
+        set
+        {
+            Volatile.Write(ref _tracked, value.ToArray());
+            Poke();
+        }
+    }
+
+    /// <summary>Records history for tracked sensors and notes which top-level devices they live on.</summary>
+    void RecordTracked(List<HardwareReading> all, Summary summary)
+    {
+        var tracked = Volatile.Read(ref _tracked);
+        _trackedDevices.Clear();
+        if (tracked.Length == 0) return;
+        SensorCatalog? catalog = null;
+        foreach (var key in tracked)
+        {
+            var id = _trackedIds.GetValueOrDefault(key, key.Id);
+            var reading = all.FirstOrDefault(h => h.Id == SensorKey.HardwarePart(id))?.Sensors
+                             .FirstOrDefault(s => s.Id == id && s.Type == key.SensorType);
+            // Gone or moved (index shift after an update): look it up again, at most every 30 polls.
+            if (reading == null && (_trackedRetryTick == 0 || _tick - _trackedRetryTick >= 30 || !_trackedIds.ContainsKey(key)))
+            {
+                _trackedRetryTick = _tick;
+                catalog ??= new SensorCatalog(all);
+                if (catalog.Find(key) is { } entry)
+                {
+                    _trackedIds[key] = entry.Id;
+                    reading = entry.Sensor;
+                }
+                else
+                {
+                    _trackedIds[key] = key.Id;
+                }
+            }
+            if (reading == null) continue;
+            if (_topOf.TryGetValue(SensorKey.HardwarePart(reading.Id), out var top)) _trackedDevices.Add(top);
+            // Headline series already record their source sensor.
+            if (!summary.Sources.Values.Contains(reading.Id)) _history.Push(reading.Id, reading.Value);
+        }
+    }
+
     void Loop()
     {
         while (_running)
@@ -188,6 +287,7 @@ public sealed class HardwareService : IDisposable
         // The dashboard shows everything, including NVML-only PCIe throughput: stream it from a
         // helper process while the dashboard is open, so NVML's memory leaves with the helper.
         if (_nvmlBlocked) _nvmlFeed.SetWanted(DetailedMode, _computer.Hardware.Any(h => h.HardwareType == HardwareType.GpuNvidia));
+        RunCommands();
         UpdateHardware();
 
         var all = new List<HardwareReading>();
@@ -236,6 +336,7 @@ public sealed class HardwareService : IDisposable
             Push("gputemp:" + g.Id, g.Temp);
             Push("gpupower:" + g.Id, g.Power);
         }
+        RecordTracked(all, summary);
 
         // Snapshots carry the short window the taskbar/tiles draw; the dashboard asks for longer ranges.
         var snap = new Snapshot(DateTime.Now, display, summary, _history.Recent(HistoryLength), all);
@@ -262,9 +363,12 @@ public sealed class HardwareService : IDisposable
                 HardwareType.Motherboard => DetailedMode || NeedBoard ? 0 : 3000,
                 HardwareType.Battery => DetailedMode || NeedBattery ? 0 : 5000,
                 HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel
-                    when _primaryGpuId != null && hw.Identifier.ToString() != _primaryGpuId => DetailedMode || NeedSecondGpu ? 0 : 5000,
+                    when _primaryGpuId != null && IdOf(hw) != _primaryGpuId => DetailedMode || NeedSecondGpu ? 0 : 5000,
                 _ => 0,
             };
+            // A sensor pinned to the taskbar should update like the built-in items (drives stay at 5 s).
+            if (everyMs > 0 && _trackedDevices.Contains(IdOf(hw)))
+                everyMs = hw.HardwareType == HardwareType.Storage ? Math.Min(everyMs, 5000) : 0;
             if (!first && everyMs > 0)
             {
                 int ticks = Math.Max(1, everyMs / Math.Max(1, IntervalMs));
@@ -463,28 +567,59 @@ public sealed class HardwareService : IDisposable
     // Identifier.ToString() builds a new string each call; sensors keep their identifier for life.
     static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ISensor, string> SensorIds = new();
     static string IdOf(ISensor s) => SensorIds.GetValue(s, x => x.Identifier.ToString());
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IHardware, string> HardwareIds = new();
+    static string IdOf(IHardware h) => HardwareIds.GetValue(h, x => x.Identifier.ToString());
 
-    void Collect(IHardware hw, List<HardwareReading> into)
+    /// <summary>Running sum and count per sensor id, for the session average (poll thread only).</summary>
+    readonly Dictionary<string, (double Sum, long Count)> _averages = new();
+    /// <summary>Device id → id of the top-level device it is polled through (sub-hardware like Super I/O chips).</summary>
+    readonly Dictionary<string, string> _topOf = new();
+
+    float? Average(string id, float? value)
+    {
+        ref var acc = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_averages, id, out _);
+        if (value is { } v)
+        {
+            acc.Sum += v;
+            acc.Count++;
+        }
+        return acc.Count > 0 ? (float)(acc.Sum / acc.Count) : null;
+    }
+
+    SensorReading Synthetic(string hardwareId, string sensor, string name, SensorType type, float? value, float? min = null, float? max = null)
+    {
+        var id = SyntheticIds.For(hardwareId, sensor);
+        return new SensorReading(id, name, type, value, min, max, Average(id, value));
+    }
+
+    void Collect(IHardware hw, List<HardwareReading> into, string? top = null)
     {
         var sensors = hw.Sensors
             .Where(s => s.Value.HasValue)
             .OrderBy(s => (int)s.SensorType).ThenBy(s => s.Index)
-            .Select(s => new SensorReading(IdOf(s), s.Name, s.SensorType, Clean(s.Value), Clean(s.Min), Clean(s.Max)))
+            .Select(s =>
+            {
+                var id = IdOf(s);
+                var value = Clean(s.Value);
+                return new SensorReading(id, s.Name, s.SensorType, value, Clean(s.Min), Clean(s.Max), Average(id, value));
+            })
             .ToList();
-        var reading = new HardwareReading(hw.Identifier.ToString(), hw.Name, hw.HardwareType, sensors);
+        var reading = new HardwareReading(IdOf(hw), hw.Name, hw.HardwareType, sensors);
+        top ??= reading.Id;
+        _topOf.TryAdd(reading.Id, top);
         if (hw.HardwareType == HardwareType.GpuNvidia)
         {
             if (_nvmlFeed.TryGet(hw.Name, out var feed))
             {
                 // Same names LibreHardwareMonitor uses when it has NVML itself.
-                sensors.Add(new SensorReading(SyntheticIds.For(reading.Id, "power/package"), "GPU Package", SensorType.Power, feed.Watts, null, null));
-                sensors.Add(new SensorReading(SyntheticIds.For(reading.Id, "throughput/pcie-rx"), "GPU PCIe Rx", SensorType.Throughput, feed.RxBytes, null, null));
-                sensors.Add(new SensorReading(SyntheticIds.For(reading.Id, "throughput/pcie-tx"), "GPU PCIe Tx", SensorType.Throughput, feed.TxBytes, null, null));
+                sensors.Add(Synthetic(reading.Id, "power/package", "GPU Package", SensorType.Power, feed.Watts));
+                sensors.Add(Synthetic(reading.Id, "throughput/pcie-rx", "GPU PCIe Rx", SensorType.Throughput, feed.RxBytes));
+                sensors.Add(Synthetic(reading.Id, "throughput/pcie-tx", "GPU PCIe Tx", SensorType.Throughput, feed.TxBytes));
             }
             CalibrateOrEstimatePower(reading, sensors);
         }
         into.Add(reading);
-        foreach (var sub in hw.SubHardware) Collect(sub, into);
+        foreach (var sub in hw.SubHardware) Collect(sub, into, top);
     }
 
     void CalibrateOrEstimatePower(HardwareReading gpu, List<SensorReading> sensors)
@@ -518,7 +653,7 @@ public sealed class HardwareService : IDisposable
         float watts = pct.Value * ratio;
         var range = _estimatedRange.TryGetValue(gpu.Id, out var r) ? (Math.Min(r.Min, watts), Math.Max(r.Max, watts)) : (watts, watts);
         _estimatedRange[gpu.Id] = range;
-        sensors.Add(new SensorReading(SyntheticIds.For(gpu.Id, "power/board"), "GPU Board Power", SensorType.Power, watts, range.Item1, range.Item2));
+        sensors.Add(Synthetic(gpu.Id, "power/board", "GPU Board Power", SensorType.Power, watts, range.Item1, range.Item2));
     }
 
     /// <summary>Loads NVML (permanently) by re-creating the GPU devices with it available.</summary>

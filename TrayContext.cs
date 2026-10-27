@@ -59,6 +59,13 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         _ = _dash.Handle; // create the window now so we can marshal sensor updates onto the UI thread
         _dash.RestartAsAdminRequested += RestartElevated;
         _dash.SettingsRequested += () => OpenSettings();
+        _dash.SensorsChanged += () =>
+        {
+            _settings.Save();
+            SettingsChanged();
+            _settingsForm?.SensorItemsChanged();
+        };
+        _dash.ResetMinMaxRequested += _hw.ResetMinMax;
         _dash.VisibleChanged += (_, _) =>
         {
             _hw.DetailedMode = _dash.Visible;
@@ -68,7 +75,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
 
         _menu = BuildMenu();
         _widget = new TaskbarWidget(settings, _menu) { LightTaskbar = _taskbarLight };
-        _widget.ItemClicked += v => ToggleDashboard(v.Kind);
+        _widget.ItemClicked += v => ToggleDashboard(v.Kind, pageKey: v.Page);
         // Windows closing a window for us (shutdown, Task Scheduler "End") means the app should exit.
         _widget.FormClosed += (_, _) => Exit();
         _dash.FormClosed += (_, _) => Exit();
@@ -119,6 +126,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         _hw.NeedBoard = Shown(WidgetKind.Board);
         _hw.NeedSecondGpu = Shown(WidgetKind.SecondGpu);
         _hw.NeedBattery = Shown(WidgetKind.Battery);
+        _hw.TrackedSensors = _settings.TrackedSensors(_hw.Latest);
     }
 
     void SyncExtraWidgets()
@@ -137,7 +145,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         foreach (var handle in wanted.Where(h => !_extraWidgets.ContainsKey(h)))
         {
             var w = new TaskbarWidget(_settings, _menu, handle) { LightTaskbar = _taskbarLight };
-            w.ItemClicked += v => ToggleDashboard(v.Kind);
+            w.ItemClicked += v => ToggleDashboard(v.Kind, pageKey: v.Page);
             _extraWidgets[handle] = w;
             if (_hw.Latest is { } snap) w.SetSnapshot(snap);
         }
@@ -179,6 +187,8 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             StartPowerCalibrationIfNeeded(snap);
             NoticeMissingPawnIo();
         }
+        // Favourites are stored by id; their keys come from a snapshot (drives appear in the second).
+        if (_snapshots <= 2) ApplyToService();
         // The battery group is discovered with the deferred groups on the second poll.
         if (_snapshots == 2) EnableBatteryItemOnce(snap);
         // Discovery (drives especially) allocates a lot once. The deferred groups are found on the
@@ -522,28 +532,28 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
 
     // ---- Dashboard / settings ---------------------------------------------------------------
 
-    void ToggleDashboard(WidgetKind? page, bool fromHotkey = false)
+    void ToggleDashboard(WidgetKind? page, bool fromHotkey = false, string? pageKey = null)
     {
         if (_dash.Visible)
         {
             // Clicking a different taskbar item switches pages instead of closing.
-            if (page != null && _dash.SwitchTo(page.Value)) return;
+            if (page != null && _dash.SwitchTo(page.Value, pageKey)) return;
             _dash.Hide();
             return;
         }
         // The click that lands on a tray icon first deactivates (and hides) an open dashboard;
         // don't immediately reopen it.
         if (!fromHotkey && (DateTime.Now - _dash.LastAutoHidden).TotalMilliseconds < 300) return;
-        ShowDashboard(page, fromHotkey);
+        ShowDashboard(page, fromHotkey, pageKey);
     }
 
-    void ShowDashboard(WidgetKind? page = null, bool nearTray = false)
+    void ShowDashboard(WidgetKind? page = null, bool nearTray = false, string? pageKey = null)
     {
         if (_hw.Latest is { } snap) _dash.SetSnapshot(snap);
         var anchor = Cursor.Position;
         if (nearTray && Screen.PrimaryScreen is { } screen)
             anchor = new Point(screen.WorkingArea.Right - 20, screen.WorkingArea.Bottom - 20);
-        _dash.ShowNear(anchor, page);
+        _dash.ShowNear(anchor, page, pageKey);
     }
 
     void OpenSettings(string? page = null, Rectangle? bounds = null)

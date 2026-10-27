@@ -28,6 +28,9 @@ for a dashboard of every sensor in your machine.
 - Follows the taskbar's light/dark theme, steps aside for fullscreen games and video, and supports auto-hiding
   taskbars (optionally as a floating bar).
 - **Hover cards** with the full device name (e.g. *NVIDIA GeForce RTX 5080 · Discrete*), a graph and key details.
+- **Any sensor on the taskbar**: pin any reading (a fan, a drive, the GPU hot spot, a voltage) with Settings →
+  Taskbar → Add sensor…, or from the dashboard. Each shows its value with its min and max, a mini graph, and a hover
+  card with the session average. A sensor whose device is unplugged stays in place and shows `--`.
 - **Optional tray icons** (label + number, or number only) for CPU/GPU temperature and usage, RAM and power.
 
 ### Dashboard
@@ -41,9 +44,12 @@ for a dashboard of every sensor in your machine.
   graph.
 - **Keyboard and screen reader friendly**: Tab / Shift+Tab move through everything clickable, Enter activates,
   and every control has a name for screen readers (in Settings too).
-- **Every sensor** LibreHardwareMonitor can read, with min/max. Noisy ones (per-engine D3D load, power-connector
-  pins, memory timings) stay hidden until you ask for them.
-- **Overview page** with system information: Windows version, CPU, GPUs, memory modules, motherboard, drives.
+- **Every sensor** LibreHardwareMonitor can read, with min, session average and max. Noisy ones (per-engine D3D
+  load, power-connector pins, memory timings) stay hidden until you ask for them.
+- **Sensor options**: click or right-click any sensor (or press the menu key) to favourite it, rename it (the new
+  name is used everywhere), hide it, show it on the taskbar, or reset its min, max and average.
+- **Overview page** with your favourite sensors and system information: Windows version, CPU, GPUs, memory
+  modules, motherboard, drives.
 
 ### Settings
 Sidebar navigation and setting cards, with a live preview of the taskbar strip as you edit.
@@ -107,6 +113,7 @@ dotnet test tests/PCVitals.Tests
 | Right-click the strip or tray icon | Menu: dashboard, settings, refresh rate, start with Windows, exit |
 | Ctrl+↑ / Ctrl+↓ in the dashboard | Previous / next device |
 | Tab / Shift+Tab, Enter in the dashboard | Move between and activate buttons, devices and tiles |
+| Click or right-click a sensor in the dashboard | Favourite, rename, hide, show on the taskbar, reset min/max |
 
 On Windows 11, new tray icons start in the overflow (`^`) menu. The taskbar strip doesn't need this, but you
 can drag the PC Vitals icon onto the taskbar if you like.
@@ -170,8 +177,10 @@ Found a bug? Please [open an issue](../../issues/new/choose) and attach the sens
 
 | File | What it does |
 |---|---|
-| `HardwareService.cs` | Owns LibreHardwareMonitor, polls on a background thread, builds snapshots, summaries and history |
-| `NvmlFeed.cs` | Helper process that streams NVML readings while the dashboard is open |
+| `Core/HardwareService.cs` | Owns LibreHardwareMonitor, polls on a background thread, builds snapshots and summaries |
+| `Core/Readings.cs` / `Core/SensorCatalog.cs` | Readings with stable sensor ids, saved sensor references, and sensor lookup and search |
+| `Core/HistoryStore.cs` | Recent and one-minute history, by sensor id with aliases for the headline series |
+| `Core/NvmlFeed.cs` | Helper process that streams NVML readings while the dashboard is open |
 | `ProcessStats.cs` / `GpuProcessUsage.cs` | Top processes by CPU, memory and GPU |
 | `Vitals.cs` | Turns a snapshot into display items (labels, values, detail rows) shared by every view |
 | `TaskbarWidget.cs` / `StripFit.cs` | The per-pixel-alpha layered window drawn on the taskbar, and its fit rules |
@@ -179,6 +188,7 @@ Found a bug? Please [open an issue](../../issues/new/choose) and attach the sens
 | `HoverCard.cs` | Detail card shown when hovering a taskbar item |
 | `DashboardForm.cs` / `DashboardView.cs` | The dashboard window (owner-drawn) |
 | `SettingsForm.cs` / `SettingsControls.cs` | Settings window and its toggle, card, dropdown and preview controls |
+| `SensorDialogs.cs` | The sensor picker and the rename prompt |
 | `TrayContext.cs` | App lifetime, tray icons, menu, alerts and wiring |
 | `AppSettings.cs` | Settings persistence and the start-with-Windows task |
 | `Theme.cs` | Light, dark and AMOLED palettes, and value formatting |

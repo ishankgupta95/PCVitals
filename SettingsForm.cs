@@ -253,7 +253,7 @@ sealed class SettingsForm : Form
         var preview = new LivePreview(c =>
         {
             if (_host.Latest is not { } snap) return (null, null);
-            var views = _s.WidgetItems.Where(i => i.Enabled).Select(i => Vitals.Build(i.Kind, i.Label, snap))
+            var views = _s.WidgetItems.Where(i => i.Enabled).Select(i => Vitals.ForItem(i, snap, _s))
                 .Where(v => v != null).Select(v => v!).ToList();
             if (views.Count == 0) return (null, "No items are turned on.");
             float scale = c.DeviceDpi / 96f * _s.WidgetScale / 100f;
@@ -280,6 +280,9 @@ sealed class SettingsForm : Form
         };
         p.Controls.Add(_itemsHost);
         BuildItemRows();
+        var addSensor = new PillButton("Add sensor…", AddSensor) { Margin = new Padding(0, 4, 0, 8), AccessibleName = "Add a sensor to the taskbar" };
+        p.Controls.Add(addSensor);
+        p.Controls.Add(Hint("Any reading from the dashboard can go on the taskbar too: pick one here, or right-click a sensor in the dashboard."));
 
         p.Controls.Add(Section("Layout"));
         var sizes = new[] { 85, 100, 115 };
@@ -336,17 +339,56 @@ sealed class SettingsForm : Form
                 item.Label = label.Value.Trim();
                 Changed();
             };
-            var name = Vitals.DisplayName(item.Kind);
+            var (name, description) = item.Kind == WidgetKind.Sensor ? DescribeSensor(item) : (Vitals.DisplayName(item.Kind), Describe(item.Kind));
             label.FieldName = $"Label for {name}";
             label.AccessibleName = $"Label for {name}";
             var up = new PillButton("", () => MoveItem(index, -1), 34) { Glyph = "", Enabled = i > 0, AccessibleName = $"Move {name} up" };
             var down = new PillButton("", () => MoveItem(index, +1), 34) { Glyph = "", Enabled = i < _s.WidgetItems.Count - 1, AccessibleName = $"Move {name} down" };
             var toggle = Toggle(item.Enabled, v => item.Enabled = v);
             toggle.AccessibleName = $"Show {name} on the taskbar";
-            host.Controls.Add(new Card(Vitals.DisplayName(item.Kind), Describe(item.Kind), new AccessoryRow(label, up, down, toggle)));
+            var controls = new List<Control> { label, up, down };
+            if (item.Kind == WidgetKind.Sensor)
+                controls.Add(new PillButton("", () => RemoveItem(index), 34) { Glyph = "", AccessibleName = $"Remove {name}" });
+            controls.Add(toggle);
+            host.Controls.Add(new Card(name, description, new AccessoryRow(controls.ToArray())));
         }
         host.ResumeLayout();
         if (host.Parent is FlowLayoutPanel page) Stretch(page);
+    }
+
+    (string Name, string Description) DescribeSensor(WidgetItem item)
+    {
+        var key = item.Sensor!;
+        var entry = _host.Latest?.FindSensor(key);
+        var name = _s.SensorName(entry?.Id ?? key.Id, key.SensorName);
+        var device = HardwareService.ShortName(entry?.Hardware.Name ?? key.HardwareName);
+        return (name, entry == null ? $"{device} · not available right now" : $"{device} · {DashboardView.GroupName(key.SensorType).ToLowerInvariant()}");
+    }
+
+    void AddSensor()
+    {
+        var entry = SensorPicker.Pick(this, () => _host.Latest, _s);
+        if (entry == null) return;
+        _s.PinSensor(entry.Key, SensorFormat.DefaultLabel(_s.SensorName(entry.Id, entry.Sensor.Name)));
+        BuildItemRows();
+        Changed();
+    }
+
+    void RemoveItem(int index)
+    {
+        if (index < 0 || index >= _s.WidgetItems.Count || _s.WidgetItems[index].Kind != WidgetKind.Sensor) return;
+        _s.WidgetItems.RemoveAt(index);
+        BeginInvoke(() =>
+        {
+            BuildItemRows();
+            Changed();
+        });
+    }
+
+    /// <summary>Sensor items were pinned or removed elsewhere (the dashboard).</summary>
+    public void SensorItemsChanged()
+    {
+        if (_itemsHost != null) BuildItemRows();
     }
 
     void MoveItem(int index, int delta)

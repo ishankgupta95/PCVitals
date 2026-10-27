@@ -102,7 +102,7 @@ sealed class TaskbarWidget : Form
         _taskbar = tb;
 
         var views = _settings.WidgetItems.Where(i => i.Enabled)
-            .Select(i => Vitals.Build(i.Kind, i.Label, _snap))
+            .Select(i => Vitals.ForItem(i, _snap, _settings))
             .Where(v => v != null).Select(v => v!).ToList();
         float dpiScale = tb.Dpi / 96f;
         var (scale, graphs, shown) = Fit(views, tb, dpiScale);

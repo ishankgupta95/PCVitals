@@ -95,7 +95,7 @@ public class SensorKeyTests
     [Theory]
     [InlineData("/amdcpu/0/temperature/2", "/amdcpu/0")]
     [InlineData("/lpc/nct6799d/0/fan/1", "/lpc/nct6799d/0")]
-    [InlineData("/pcvitals/gpu-nvidia/0/power/board", "/pcvitals/gpu-nvidia/0")]
+    [InlineData("/pcvitals/gpu-nvidia/0/power/board", "/gpu-nvidia/0")]
     public void Hardware_part_of_an_id(string id, string hardware) => Assert.Equal(hardware, SensorKey.HardwarePart(id));
 
     [Fact]

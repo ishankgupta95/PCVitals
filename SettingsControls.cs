@@ -364,6 +364,18 @@ sealed class InputBox : Control
 
     public new event EventHandler? TextChanged;
     public string Value => _box.Text;
+    /// <summary>Raised for keys pressed in the text field (e.g. to move a list below it with the arrows).</summary>
+    public event KeyEventHandler? FieldKeyDown
+    {
+        add => _box.KeyDown += value;
+        remove => _box.KeyDown -= value;
+    }
+
+    public void FocusText()
+    {
+        _box.Focus();
+        _box.SelectAll();
+    }
 
     /// <summary>Name screen readers announce for the text field.</summary>
     public string? FieldName
