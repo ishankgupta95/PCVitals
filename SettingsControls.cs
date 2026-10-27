@@ -823,3 +823,23 @@ sealed class ChoiceCard : Control
     protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hover = true; Invalidate(); }
     protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hover = false; Invalidate(); }
 }
+
+/// <summary>
+/// A scrolling settings page. Cards settle their height only after the page has placed them (their
+/// descriptions wrap at the final width), so the page's own scroll height can come out short and
+/// leave the end of the page out of reach. After each layout this sizes the scroll area to where
+/// the content actually ends, plus the bottom padding.
+/// </summary>
+sealed class SettingsPage : FlowLayoutPanel
+{
+    protected override void OnLayout(LayoutEventArgs e)
+    {
+        base.OnLayout(e);
+        int bottom = 0;
+        foreach (Control c in Controls)
+            if (c.Visible) bottom = Math.Max(bottom, c.Bottom + c.Margin.Bottom);
+        // Child positions are relative to the scrolled view; AutoScrollPosition.Y is negative when scrolled down.
+        int content = bottom - AutoScrollPosition.Y + Padding.Bottom;
+        if (AutoScrollMinSize.Height != content) AutoScrollMinSize = new Size(0, content);
+    }
+}

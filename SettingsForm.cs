@@ -154,7 +154,7 @@ sealed class SettingsForm : Form
     void AddPage(string key, string title, string glyph, Action<FlowLayoutPanel> build)
     {
         _nav.Add(key, title, glyph);
-        var page = new FlowLayoutPanel
+        var page = new SettingsPage
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.TopDown,
@@ -176,6 +176,34 @@ sealed class SettingsForm : Form
         page.Resize += (_, _) => Stretch(page);
         _pages[key] = page;
         _content.Controls.Add(page);
+    }
+
+    /// <summary>
+    /// For the layout check in --preview: shows each page scrolled to its end and reports whether its
+    /// last control is fully in view.
+    /// </summary>
+    internal string ScrollReport()
+    {
+        var lines = new List<string>();
+        foreach (var key in _pages.Keys.ToList())
+        {
+            _nav.Select(key);
+            var page = _pages[key];
+            page.PerformLayout();
+            Application.DoEvents();
+            page.AutoScrollPosition = new Point(0, int.MaxValue);
+            Application.DoEvents();
+            var last = page.Controls.Cast<Control>().Where(c => c.Visible).MaxBy(c => c.Bottom);
+            int gap = page.ClientSize.Height - (last?.Bottom ?? 0);
+            lines.Add($"{key}: last control ends {(gap >= 0 ? $"{gap}px above" : $"{-gap}px BELOW")} the bottom of the view");
+        }
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    internal void ShowAtEnd(string key)
+    {
+        _nav.Select(key);
+        _pages[key].AutoScrollPosition = new Point(0, int.MaxValue);
     }
 
     void ShowPageInternal(string key)

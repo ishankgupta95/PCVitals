@@ -740,6 +740,16 @@ static class Program
                             new Rectangle(origin.X - form.Left, origin.Y - form.Top, client.Width, client.Height), GraphicsUnit.Pixel);
             }
             bmp.Save(Path.Combine(dir, file), ImageFormat.Png);
+            if (page == "taskbar")
+            {
+                // Layout check: every page must scroll far enough to show its last card in full.
+                File.WriteAllText(Path.Combine(dir, "settings-scroll.txt"), form.ScrollReport());
+                form.ShowAtEnd("taskbar");
+                Application.DoEvents();
+                using var end = new Bitmap(form.Width, form.Height);
+                form.DrawToBitmap(end, new Rectangle(0, 0, form.Width, form.Height));
+                end.Save(Path.Combine(dir, "settings-taskbar-end.png"), ImageFormat.Png);
+            }
             form.Close();
         }
 
