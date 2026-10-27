@@ -16,6 +16,13 @@ static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        // Text is formatted and parsed the same on every PC (as with invariant globalization), but real
+        // cultures exist, so WinForms can look up the keyboard layout's culture when it changes.
+        System.Globalization.CultureInfo.DefaultThreadCurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+        System.Globalization.CultureInfo.DefaultThreadCurrentUICulture = System.Globalization.CultureInfo.InvariantCulture;
+        System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+        System.Globalization.CultureInfo.CurrentUICulture = System.Globalization.CultureInfo.InvariantCulture;
+
         // Diagnostics / dev aids. None of these touch the running instance.
         if (args.Length >= 2 && args[0] == "--dump") return Dump(args[1]);
         if (args.Length >= 2 && args[0] == "--preview") return Preview(args[1]);
