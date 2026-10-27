@@ -87,7 +87,9 @@ you name another host). No telemetry. Settings live in `%APPDATA%\PCVitals\setti
 
 ## Requirements
 
-- Windows 10 or 11, x64
+- Windows 10 or 11, x64. On Windows on ARM (Snapdragon) it runs under x64 emulation in the limited mode
+  only: the PawnIO driver and LibreHardwareMonitor's hardware access are x64-only, so CPU temperature/power,
+  motherboard and fan sensors aren't available.
 - [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (to run), or the .NET 8 SDK (to build)
 - **Administrator rights** for CPU temperature/power, motherboard, chipset, fan, DIMM and drive sensors. The app
   asks once at startup; if you decline it runs in a limited mode (GPU, load, memory and network still work).

@@ -87,6 +87,7 @@ sealed class TaskbarWidget : Form
         bool blip = tb == null && Visible && !_taskbarMissing;
         _taskbarMissing = tb == null;
         if (blip) return;
+        if (tb is { Horizontal: false }) FitNote = "The strip is hidden: it only fits a taskbar at the top or bottom of the screen.";
         if (tb == null || !tb.Horizontal || Native.FullscreenAppActive(tb.Handle))
         {
             HideAll();
@@ -132,8 +133,10 @@ sealed class TaskbarWidget : Form
         _pos = Place(tb, bmp.Width, dpiScale);
         if (floating)
         {
+            // On the screen edge the hidden taskbar is parked at (top or bottom).
             var screen = Screen.FromHandle(tb.Handle).Bounds;
-            _pos = new Point(_pos.X, screen.Bottom - bmp.Height - (int)(6 * scale));
+            bool top = tb.Bounds.Top + tb.Bounds.Height / 2 < screen.Top + screen.Height / 2;
+            _pos = new Point(_pos.X, top ? screen.Top + (int)(6 * scale) : screen.Bottom - bmp.Height - (int)(6 * scale));
         }
         Native.SetLayeredBitmap(Handle, bmp, _pos);
         if (!Visible) Show();
@@ -254,15 +257,33 @@ sealed class TaskbarWidget : Form
     /// Column widths per item. They come from templates ("100%", "100°C") rather than the current
     /// text, so the strip doesn't jiggle as values change.
     /// </summary>
+    // Fit measures the strip on every redraw, often several times; the texts ("47%", "52°C", labels)
+    // repeat, so their widths are kept per font (fonts are shared per scale) instead of re-measured.
+    static readonly Dictionary<(Font Font, string Text), float> TextWidths = new();
+    static Graphics? _measure;
+
+    static float TextWidth(string? s, Font f)
+    {
+        if (string.IsNullOrEmpty(s)) return 0;
+        lock (TextWidths)
+        {
+            if (TextWidths.TryGetValue((f, s), out var w)) return w;
+            if (TextWidths.Count > 4096) TextWidths.Clear();
+            if (_measure == null)
+            {
+                _measure = Graphics.FromImage(new Bitmap(1, 1));
+                _measure.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            }
+            return TextWidths[(f, s)] = _measure.MeasureString(s, f, int.MaxValue, Typo).Width;
+        }
+    }
+
     static List<(int A, int B, int G, int Width)> LayoutItems(IReadOnlyList<ItemView> views, float scale, bool graphs)
     {
         int S(float v) => (int)Math.Round(v * scale);
         var fonts = StripFonts.For(scale);
         int padX = S(9), gap = S(7), graphW = S(34);
-        using var probe = new Bitmap(1, 1);
-        using var mg = Graphics.FromImage(probe);
-        mg.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-        float Wd(string? s, Font f) => string.IsNullOrEmpty(s) ? 0 : mg.MeasureString(s, f, int.MaxValue, Typo).Width;
+        float Wd(string? s, Font f) => TextWidth(s, f);
 
         var layout = new List<(int A, int B, int G, int Width)>();
         foreach (var v in views)
