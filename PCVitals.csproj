@@ -13,7 +13,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>PCVitals</AssemblyName>
     <Product>PC Vitals</Product>
-    <Version>1.1.1</Version>
+    <Version>1.2.0</Version>
 
     <!-- Footprint: precompile to native code (no JIT at startup), skip ICU, and use a GC tuned
          for a small, long-running background process instead of throughput. Cultures come from
