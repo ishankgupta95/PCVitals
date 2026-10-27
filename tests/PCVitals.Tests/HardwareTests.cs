@@ -93,6 +93,50 @@ public class HardwareTests
         Assert.Null(GpuAdapters.IsIntegrated(null, mixed, GpuAdapters.VendorOf(HardwareType.GpuIntel)));
     }
 
+    static readonly string[] Displays =
+    {
+        @"PCI\VEN_1002&DEV_15BF&SUBSYS_0B2B1028&REV_C1\4&2C6A3A52&0&0041",
+        @"PCI\VEN_10DE&DEV_2860&SUBSYS_0B2B1028&REV_A1\4&1&0008",
+    };
+
+    [Theory]
+    [InlineData(@"PCI\VEN_1002&DEV_15BF&SUBSYS_0B2B1028&REV_C1\4&2C6A3A52&0&0041", 0x1002u, 0)]
+    [InlineData(@"\\?\pci#ven_1002&dev_15bf&subsys_0b2b1028&rev_c1#4&2c6a3a52&0&0041#{1ca05180-a699-450a-9a0c-de4fbe3ddd89}", 0x1002u, 0)]
+    [InlineData(null, 0x10DEu, 1)] // NVIDIA without a path: the only NVIDIA adapter
+    [InlineData(null, 0x8086u, -1)]
+    public void Finds_the_display_adapter_instance(string? path, uint vendor, int expected) =>
+        Assert.Equal(expected < 0 ? null : Displays[expected], GpuPowerState.InstanceFor(path, vendor, Displays));
+
+    [Fact]
+    public void Two_identical_cards_without_a_path_are_ambiguous()
+    {
+        var twins = new[] { @"PCI\VEN_10DE&DEV_2C02&SUBSYS_89DE1043&REV_A1\1", @"PCI\VEN_10DE&DEV_2C02&SUBSYS_89DE1043&REV_A1\2" };
+        Assert.Null(GpuPowerState.InstanceFor(null, 0x10DE, twins));
+        Assert.Equal(twins[1], GpuPowerState.InstanceFor(@"\\?\PCI#VEN_10DE&DEV_2C02&SUBSYS_89DE1043&REV_A1#2#{1ca05180-a699-450a-9a0c-de4fbe3ddd89}", 0x10DE, twins));
+    }
+
+    [Theory]
+    [InlineData(1, false)] // D0
+    [InlineData(4, true)]  // D3
+    [InlineData(0, false)] // unspecified
+    public void Only_d3_counts_as_asleep(int state, bool asleep) => Assert.Equal(asleep, GpuPowerState.IsAsleep(state));
+
+    static GpuSummary Summary(string id, bool integrated, bool sleeping = false) =>
+        new() { Id = id, Name = id, ShortName = id, Integrated = integrated, Sleeping = sleeping };
+
+    [Fact]
+    public void A_sleeping_discrete_gpu_hands_the_main_item_to_the_igpu()
+    {
+        var igpu = Summary("igpu", true);
+        var dgpu = Summary("dgpu", false, sleeping: true);
+        Assert.Equal((igpu, dgpu), HardwareService.PickGpus(new[] { dgpu, igpu }, null));
+        // Awake again: back to the discrete GPU.
+        var awake = Summary("dgpu", false);
+        Assert.Equal((awake, igpu), HardwareService.PickGpus(new[] { awake, igpu }, null));
+        // A GPU the user chose stays chosen, asleep or not.
+        Assert.Equal(dgpu, HardwareService.PickGpus(new[] { dgpu, igpu }, "dgpu").Primary);
+    }
+
     [Fact]
     public void Disagreeing_adapters_give_no_answer() =>
         Assert.Null(GpuAdapters.IsIntegrated(@"\\?\PCI#VEN_1002&DEV_1234#1",

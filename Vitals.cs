@@ -375,13 +375,22 @@ static class Vitals
         {
             Kind = kind, Title = g.Integrated ? "iGPU" : "GPU", Accent = g.Integrated ? Theme.IGpu : Theme.Gpu, Label = label,
             Device = g.Name, DeviceShort = g.ShortName, Tag = g.Integrated ? "Integrated" : "Discrete",
-            Primary = Pct(g.Load), Line1 = Deg(g.Temp), Line1Temp = g.Temp, Line2 = Watts(g.Power),
+            // A sleeping GPU isn't read (that would wake it), so it has no values to show.
+            Primary = g.Sleeping ? "Off" : Pct(g.Load), Line1 = g.Sleeping ? "asleep" : Deg(g.Temp), Line1Temp = g.Temp,
+            Line2 = g.Sleeping ? "" : Watts(g.Power),
             History = snap.History.TryGetValue("gpu:" + g.Id, out var h) ? h : null, HistoryMax = 100,
             HistoryCaption = "Usage · last 90 seconds",
-            TileSub = g.VramTotalMb is { } total && !g.Integrated
+            TileSub = g.Sleeping ? "Sleeping to save power"
+                : g.VramTotalMb is { } total && !g.Integrated
                 ? $"{Watts(g.Power)}  ·  {(g.VramUsedMb ?? 0) / 1024:0.0}/{total / 1024:0} GB VRAM"
                 : Watts(g.Power),
         };
+        if (g.Sleeping)
+        {
+            v.Rows.Add(new("State", "Sleeping (powered down to save power)"));
+            v.Rows.Add(new("Readings", "Paused until it wakes, so checking doesn't wake it"));
+            return v;
+        }
         v.Rows.Add(new("Usage", Pct1(g.Load)));
         v.Rows.Add(new("Temperature", Deg1(g.Temp), Theme.TempColor(g.Temp)));
         if (g.HotSpot is { } hs) v.Rows.Add(new("Hot spot", Deg1(hs), Theme.TempColor(hs)));

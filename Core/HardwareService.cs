@@ -231,6 +231,7 @@ public sealed class HardwareService : IDisposable
 
     void Loop()
     {
+        PreferEfficiency();
         while (_running)
         {
             var started = Environment.TickCount64;
@@ -287,7 +288,8 @@ public sealed class HardwareService : IDisposable
         }
         // The dashboard shows everything, including NVML-only PCIe throughput: stream it from a
         // helper process while the dashboard is open, so NVML's memory leaves with the helper.
-        if (_nvmlBlocked) _nvmlFeed.SetWanted(DetailedMode, _computer.Hardware.Any(h => h.HardwareType == HardwareType.GpuNvidia));
+        // NVML would wake a sleeping card, so the helper only runs while one is awake.
+        if (_nvmlBlocked) _nvmlFeed.SetWanted(DetailedMode, _computer.Hardware.Any(h => h.HardwareType == HardwareType.GpuNvidia && !_sleepingGpus.Contains(IdOf(h))));
         RunCommands();
         UpdateHardware();
 
@@ -301,7 +303,7 @@ public sealed class HardwareService : IDisposable
             LoadNvml("GPU reports no power percentage");
 
         var latency = Latency;
-        var summary = Summarize(all, PreferredGpuId, _drives, _windowsIntegrated, _wifi.FirstOrDefault(), latency?.Stats, latency?.Target);
+        var summary = Summarize(all, PreferredGpuId, _drives, _windowsIntegrated, _sleepingGpus, _wifi.FirstOrDefault(), latency?.Stats, latency?.Target);
         _primaryGpuId = summary.Gpu?.Id;
 
         var display = all
@@ -363,6 +365,9 @@ public sealed class HardwareService : IDisposable
         _tick++;
         foreach (var hw in _computer.Hardware)
         {
+            // A driver query would wake a sleeping laptop GPU (and keep it awake at one per second).
+            if (hw.HardwareType is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel && GpuAsleep(hw, IdOf(hw)))
+                continue;
             // Always read a device the first time we see it so it never shows up empty.
             bool first = _seen.Add(hw);
             int everyMs = hw.HardwareType switch
@@ -394,12 +399,32 @@ public sealed class HardwareService : IDisposable
     /// <summary>Whether Windows calls each GPU integrated (null: it doesn't say), asked once per GPU (poll thread only).</summary>
     readonly Dictionary<string, bool?> _windowsIntegrated = new();
 
+    static string? DevicePathOf(IHardware hw)
+    {
+        try { return (hw as LibreHardwareMonitor.Hardware.Gpu.GenericGpu)?.DeviceId; }
+        catch (Exception) { return null; }
+    }
+
+    /// <summary>GPUs Windows reports powered down (D3); they aren't polled, so they can stay asleep (poll thread only).</summary>
+    readonly HashSet<string> _sleepingGpus = new();
+    readonly Dictionary<string, string?> _gpuInstances = new();
+
+    bool GpuAsleep(IHardware hw, string id)
+    {
+        if (!_gpuInstances.TryGetValue(id, out var instance))
+            _gpuInstances[id] = instance = GpuPowerState.InstanceFor(DevicePathOf(hw), GpuAdapters.VendorOf(hw.HardwareType), GpuPowerState.DisplayInstances());
+        int? state = instance == null ? null : GpuPowerState.Read(instance);
+        LogOnce("gpu-power:" + id, $"{hw.Name}: power state {(state is > 0 ? $"D{state - 1}" : "unknown")} ({instance ?? "no display device matched"}).");
+        bool asleep = state is { } s && GpuPowerState.IsAsleep(s);
+        if (asleep && _sleepingGpus.Add(id)) LogOnce("gpu-sleep:" + id, $"{hw.Name} is powered down; not polling it while it sleeps.");
+        else if (!asleep) _sleepingGpus.Remove(id);
+        return asleep;
+    }
+
     void AskWindowsIfIntegrated(IHardware hw, string id)
     {
         if (_windowsIntegrated.ContainsKey(id)) return;
-        string? path = null;
-        try { path = (hw as LibreHardwareMonitor.Hardware.Gpu.GenericGpu)?.DeviceId; }
-        catch (Exception) { }
+        var path = DevicePathOf(hw);
         // Read again for each new GPU, so one plugged in later (eGPU) is found too.
         var adapters = GpuAdapters.Read();
         var answer = _windowsIntegrated[id] = GpuAdapters.IsIntegrated(path, adapters, GpuAdapters.VendorOf(hw.HardwareType));
@@ -440,6 +465,33 @@ public sealed class HardwareService : IDisposable
             LogOnce("drive-details:" + ex.GetType().Name, $"Couldn't read volumes or health of {hw.Name}: {ex.Message}");
         }
     }
+
+    /// <summary>
+    /// EcoQoS for the poll thread (Windows 11): background work that may run slower, on efficiency cores
+    /// and at lower clocks, so polling doesn't raise CPU clocks or wake performance cores on a laptop.
+    /// </summary>
+    static void PreferEfficiency()
+    {
+        var state = new ThreadPowerThrottling { Version = 1, ControlMask = 1, StateMask = 1 }; // EXECUTION_SPEED on
+        try
+        {
+            if (!SetThreadInformation(GetCurrentThread(), 3 /* ThreadPowerThrottling */, ref state, Marshal.SizeOf<ThreadPowerThrottling>()))
+                LogOnce("ecoqos", $"EcoQoS unavailable for the sensor poller (error {Marshal.GetLastWin32Error()}).");
+        }
+        catch (EntryPointNotFoundException) { } // Windows 7/8
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct ThreadPowerThrottling
+    {
+        public uint Version, ControlMask, StateMask;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetThreadInformation(IntPtr thread, int informationClass, ref ThreadPowerThrottling information, int size);
+
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentThread();
 
     /// <summary>Updates one device, skipping NVML's slow PCIe sampling unless the dashboard is open.</summary>
     internal static void UpdateDevice(IHardware hw, bool detailed)
@@ -657,7 +709,9 @@ public sealed class HardwareService : IDisposable
 
     void Collect(IHardware hw, List<HardwareReading> into, string? top = null)
     {
-        var sensors = hw.Sensors
+        // A sleeping GPU's sensors still hold the values from before it slept.
+        bool asleep = _sleepingGpus.Contains(IdOf(hw));
+        var sensors = asleep ? new List<SensorReading>() : hw.Sensors
             .Where(s => s.Value.HasValue)
             .OrderBy(s => (int)s.SensorType).ThenBy(s => s.Index)
             .Select(s =>
@@ -677,7 +731,7 @@ public sealed class HardwareService : IDisposable
         if (hw.HardwareType == HardwareType.Network && _wifi.FirstOrDefault(w => w.Matches(reading.Id)) is { } wifi)
             sensors.Add(Synthetic(reading.Id, "level/wifi-signal", "Wi-Fi signal", SensorType.Level, wifi.SignalPercent));
         if (hw.HardwareType is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel) AskWindowsIfIntegrated(hw, reading.Id);
-        if (hw.HardwareType == HardwareType.GpuNvidia)
+        if (hw.HardwareType == HardwareType.GpuNvidia && !asleep)
         {
             if (_nvmlFeed.TryGet(hw.Name, out var feed))
             {
@@ -823,12 +877,13 @@ public sealed class HardwareService : IDisposable
         return sensor.Value;
     }
 
-    static GpuSummary SummarizeGpu(HardwareReading g, bool? windowsIntegrated, Dictionary<string, string> sources) => new()
+    static GpuSummary SummarizeGpu(HardwareReading g, bool? windowsIntegrated, bool asleep, Dictionary<string, string> sources) => new()
     {
         Id = g.Id,
         Name = g.Name,
         ShortName = ShortName(g.Name),
         Integrated = IsIntegrated(g, windowsIntegrated),
+        Sleeping = asleep,
         Load = Track(sources, "gpu:" + g.Id, g.Find(SensorType.Load, "GPU Core", "D3D 3D")),
         Temp = Positive(Track(sources, "gputemp:" + g.Id, g.Find(SensorType.Temperature, "GPU Core", "GPU Edge", "GPU VR SoC") ?? g.FirstSensor(SensorType.Temperature))),
         HotSpot = Positive(g.Value(SensorType.Temperature, "GPU Hot Spot")),
@@ -844,8 +899,22 @@ public sealed class HardwareService : IDisposable
         FanPct = g.Value(SensorType.Control, "GPU Fan"),
     };
 
+    /// <summary>
+    /// The chosen GPU, else an awake discrete one, else any awake one: a laptop's sleeping discrete GPU
+    /// hands the main GPU item to the integrated one until it wakes.
+    /// </summary>
+    internal static (GpuSummary? Primary, GpuSummary? Second) PickGpus(IReadOnlyList<GpuSummary> gpus, string? preferredGpu)
+    {
+        var primary = gpus.FirstOrDefault(g => g.Id == preferredGpu)
+                      ?? gpus.FirstOrDefault(g => !g.Integrated && !g.Sleeping)
+                      ?? gpus.FirstOrDefault(g => !g.Sleeping)
+                      ?? gpus.FirstOrDefault();
+        var second = gpus.FirstOrDefault(g => g != primary && g.Integrated) ?? gpus.FirstOrDefault(g => g != primary);
+        return (primary, second);
+    }
+
     static Summary Summarize(IReadOnlyList<HardwareReading> all, string? preferredGpu, IReadOnlyDictionary<string, DriveDetails> drives,
-                             IReadOnlyDictionary<string, bool?> windowsIntegrated, WifiStatus? wifi = null, PingStats? ping = null, string? pingTarget = null)
+                             IReadOnlyDictionary<string, bool?> windowsIntegrated, IReadOnlySet<string> sleepingGpus, WifiStatus? wifi = null, PingStats? ping = null, string? pingTarget = null)
     {
         var cpu = all.FirstOrDefault(h => h.Type == HardwareType.Cpu);
         var memories = all.Where(h => h.Type == HardwareType.Memory).ToList();
@@ -874,11 +943,8 @@ public sealed class HardwareService : IDisposable
 
         // GPUs
         var gpus = all.Where(h => h.Type is HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel)
-                      .Select(g => SummarizeGpu(g, windowsIntegrated.GetValueOrDefault(g.Id), sources)).ToList();
-        var primary = gpus.FirstOrDefault(g => g.Id == preferredGpu)
-                      ?? gpus.FirstOrDefault(g => !g.Integrated)
-                      ?? gpus.FirstOrDefault();
-        var second = gpus.FirstOrDefault(g => g != primary && g.Integrated) ?? gpus.FirstOrDefault(g => g != primary);
+                      .Select(g => SummarizeGpu(g, windowsIntegrated.GetValueOrDefault(g.Id), sleepingGpus.Contains(g.Id), sources)).ToList();
+        var (primary, second) = PickGpus(gpus, preferredGpu);
 
         // Memory
         float? ramUsed = mem?.Value(SensorType.Data, "Memory Used");

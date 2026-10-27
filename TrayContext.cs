@@ -633,7 +633,9 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         var lines = new List<string>();
         if (label != null) lines.Add($"PC Vitals · {label}");
         lines.Add($"CPU {s.CpuShortName}: {Fmt.Num(s.CpuLoad)}% · {Fmt.Temp(s.CpuTemp)} · {Fmt.Num(s.CpuPower)} W");
-        if (s.Gpu is { } g)
+        if (s.Gpu is { Sleeping: true } asleep)
+            lines.Add($"GPU {asleep.ShortName}: sleeping");
+        else if (s.Gpu is { } g)
             lines.Add($"GPU {g.ShortName}{(g.Integrated ? " (iGPU)" : "")}: {Fmt.Num(g.Load)}% · {Fmt.Temp(g.Temp)} · {Fmt.Num(g.Power)} W");
         lines.Add($"RAM {Fmt.Num(s.RamUsedGb, "0.0")}/{Fmt.Num(s.RamTotalGb, "0")} GB ({Fmt.Num(s.RamLoad)}%)");
         if (s.ChipsetTemp is { } chipset) lines.Add($"Chipset {Fmt.Temp(chipset)}");

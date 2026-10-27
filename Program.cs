@@ -207,7 +207,7 @@ static class Program
         sb.AppendLine($"Admin: {IsAdmin()}");
         sb.AppendLine($"CPU  {s.CpuName} ({s.CpuShortName}): load {s.CpuLoad} temp {s.CpuTemp} power {s.CpuPower} clock {s.CpuClock}");
         foreach (var g in s.Gpus)
-            sb.AppendLine($"GPU  {g.Name} ({g.ShortName}) integrated={g.Integrated} primary={g == s.Gpu}: load {g.Load} temp {g.Temp} power {g.Power} vram {g.VramUsedMb}/{g.VramTotalMb}");
+            sb.AppendLine($"GPU  {g.Name} ({g.ShortName}) integrated={g.Integrated} sleeping={g.Sleeping} primary={g == s.Gpu}: load {g.Load} temp {g.Temp} power {g.Power} vram {g.VramUsedMb}/{g.VramTotalMb}");
         sb.AppendLine($"RAM  {s.RamUsedGb}/{s.RamTotalGb} GB ({s.RamLoad}%)  board {s.BoardName} chipset {s.ChipsetTemp}  net {s.NetDown}/{s.NetUp}");
         foreach (var d in s.Disks)
             sb.AppendLine($"DISK {d.Name} [{d.Letters}] health {d.Health.Word}{(d.Health.Notes.Count > 0 ? ": " + string.Join(" ", d.Health.Notes) : "")}"

@@ -8,6 +8,8 @@ public sealed class GpuSummary
     public required string Name { get; init; }
     public required string ShortName { get; init; }
     public bool Integrated { get; init; }
+    /// <summary>Powered down (laptop discrete GPU on battery or idle); no readings while it sleeps.</summary>
+    public bool Sleeping { get; init; }
     public float? Load { get; init; }
     public float? Temp { get; init; }
     public float? HotSpot { get; init; }
