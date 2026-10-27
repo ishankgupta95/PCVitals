@@ -6,6 +6,12 @@ body:
     attributes:
       value: |
         Thanks for reporting! Hardware differs a lot between PCs, so the sensor report below is the most useful thing you can attach.
+
+        **Needs a tester:** these were built without the hardware to try them on. Reports from these setups are especially welcome, even when everything works:
+        - **Hybrid-graphics laptop** (NVIDIA or AMD discrete GPU plus integrated graphics): does the discrete GPU show as "Off / asleep" on battery, and stay asleep (Device Manager → the GPU → Details → Power data shows D3)?
+        - **Windows 10:** do the taskbar stats stay clear of your app buttons? `PCVitals.exe --taskbar-report report.txt` shows what was found.
+        - **PCs with many drives** (10+, RAID or USB enclosures): does PC Vitals start? Attach `error.log` either way.
+        - **Two identical NVIDIA cards:** does each show its own power reading?
   - type: textarea
     id: what
     attributes:
