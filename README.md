@@ -184,6 +184,7 @@ PCVitals.exe --bench-history hist.txt       # write, compact and load a syntheti
 PCVitals.exe --alert-selftest alert.txt     # run one alert rule on live readings, including its "run a program" action
 PCVitals.exe --taskbar-report tb.txt         # taskbar geometry and how wide the strip would be
 PCVitals.exe --preview docs                  # render the README screenshots
+PCVitals.exe --write-icon PCVitals.ico      # regenerate the app icon from the logo drawing
 PCVitals.exe --replace                       # replace a running instance with this build
 PCVitals.exe --no-elevate                    # skip the admin prompt (limited mode)
 ```

@@ -50,7 +50,89 @@ static class TrayIconRenderer
     /// <summary>Static logo (a rounded tile with a pulse line) used when no metric icons are enabled.</summary>
     public static IntPtr RenderLogo(int size)
     {
-        using var bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+        using var bmp = LogoBitmap(size);
+        return bmp.GetHicon();
+    }
+
+    static readonly int[] IconSizes = { 16, 20, 24, 32, 40, 48, 64, 256 };
+    static Icon? _appIcon;
+
+    /// <summary>The app icon at every size Windows asks for (title bars, taskbar, Alt+Tab), for the app's windows.</summary>
+    public static Icon AppIcon => _appIcon ??= new Icon(new MemoryStream(IcoFile()));
+
+    /// <summary>
+    /// The logo as a .ico file with every common size: 32-bit bitmaps up to 64 px, PNG at 256 px
+    /// (the usual layout; Windows and System.Drawing read both). Also the source of PCVitals.ico,
+    /// regenerated with --write-icon.
+    /// </summary>
+    public static byte[] IcoFile()
+    {
+        var images = IconSizes.Select(s => s >= 256 ? Png(s) : Dib(s)).ToList();
+        using var ms = new MemoryStream();
+        using var w = new BinaryWriter(ms);
+        w.Write((ushort)0);
+        w.Write((ushort)1); // icon
+        w.Write((ushort)images.Count);
+        int offset = 6 + 16 * images.Count;
+        for (int i = 0; i < images.Count; i++)
+        {
+            int s = IconSizes[i];
+            w.Write((byte)(s >= 256 ? 0 : s));
+            w.Write((byte)(s >= 256 ? 0 : s));
+            w.Write((byte)0); // no palette
+            w.Write((byte)0);
+            w.Write((ushort)1); // planes
+            w.Write((ushort)32); // bits per pixel
+            w.Write(images[i].Length);
+            w.Write(offset);
+            offset += images[i].Length;
+        }
+        foreach (var img in images) w.Write(img);
+        return ms.ToArray();
+    }
+
+    static byte[] Png(int size)
+    {
+        using var bmp = LogoBitmap(size);
+        using var ms = new MemoryStream();
+        bmp.Save(ms, ImageFormat.Png);
+        return ms.ToArray();
+    }
+
+    /// <summary>An icon-format DIB: header with doubled height, bottom-up BGRA rows, then an empty AND mask.</summary>
+    static byte[] Dib(int size)
+    {
+        using var bmp = LogoBitmap(size);
+        int maskStride = (size + 31) / 32 * 4;
+        using var ms = new MemoryStream();
+        using var w = new BinaryWriter(ms);
+        w.Write(40);
+        w.Write(size);
+        w.Write(size * 2);
+        w.Write((ushort)1);
+        w.Write((ushort)32);
+        w.Write(0); // BI_RGB
+        w.Write(size * size * 4 + maskStride * size);
+        w.Write(0);
+        w.Write(0);
+        w.Write(0);
+        w.Write(0);
+        for (int y = size - 1; y >= 0; y--)
+            for (int x = 0; x < size; x++)
+            {
+                var c = bmp.GetPixel(x, y);
+                w.Write(c.B);
+                w.Write(c.G);
+                w.Write(c.R);
+                w.Write(c.A);
+            }
+        w.Write(new byte[maskStride * size]); // transparency comes from the alpha channel
+        return ms.ToArray();
+    }
+
+    static Bitmap LogoBitmap(int size)
+    {
+        var bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(bmp))
         {
             g.Clear(Color.Transparent);
@@ -68,7 +150,7 @@ static class TrayIconRenderer
             using var pen = new Pen(Color.White, Math.Max(1.5f, s / 11f)) { LineJoin = LineJoin.Round, StartCap = LineCap.Round, EndCap = LineCap.Round };
             g.DrawLines(pen, pts);
         }
-        return bmp.GetHicon();
+        return bmp;
     }
 
     static void DrawFitted(Graphics g, string text, Color color, RectangleF area, float startEm)

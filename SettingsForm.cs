@@ -66,7 +66,7 @@ sealed class SettingsForm : Form
         MinimumSize = new Size(800, 520);
         MaximizeBox = true;
         MinimizeBox = true;
-        ShowIcon = false;
+        Icon = TrayIconRenderer.AppIcon; // otherwise the taskbar shows the generic window icon
 
         _nav.Dock = DockStyle.Left;
         _nav.Width = 240;

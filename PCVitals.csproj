@@ -8,6 +8,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Drawn by TrayIconRenderer.IcoFile; regenerate with the write-icon diagnostic (see README). -->
+    <ApplicationIcon>PCVitals.ico</ApplicationIcon>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>PCVitals</AssemblyName>
     <Product>PC Vitals</Product>

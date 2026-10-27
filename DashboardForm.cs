@@ -31,7 +31,7 @@ sealed class DashboardForm : Form
         StartPosition = FormStartPosition.Manual;
         AutoScaleMode = AutoScaleMode.None; // the view scales itself to the window's DPI
         BackColor = Theme.Bg;
-        Icon = Icon.FromHandle(TrayIconRenderer.RenderLogo(32));
+        Icon = TrayIconRenderer.AppIcon;
 
         _view = new DashboardView(settings, isAdmin) { Dock = DockStyle.Fill };
         _view.RestartAsAdminRequested += () => RestartAsAdminRequested?.Invoke();

@@ -31,6 +31,12 @@ static class Program
                 return 1;
             }
         }
+        if (args.Length >= 2 && args[0] == "--write-icon")
+        {
+            // Regenerates PCVitals.ico (the exe's icon) from the logo drawing.
+            File.WriteAllBytes(args[1], TrayIconRenderer.IcoFile());
+            return 0;
+        }
         if (args.Length >= 2 && args[0] == "--alert-selftest")
         {
             try { return AlertSelfTest(args[1]); }
