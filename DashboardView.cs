@@ -74,6 +74,7 @@ sealed class DashboardView : Control
     public event Action? SettingsRequested;
     public event Action? SensorsChanged;
     public event Action<string>? ResetMinMaxRequested;
+    public event Action<SensorKey>? AddAlertRequested;
 
     /// <summary>Supplies long history for the big graph: (series key, sample count) → samples.</summary>
     public Func<string, int, float[]>? HistoryProvider { get; set; }
@@ -1173,6 +1174,7 @@ sealed class DashboardView : Control
             else _settings.PinSensor(SensorKey.For(hw, sensor), SensorFormat.DefaultLabel(name));
             Changed();
         }));
+        menu.Items.Add(Item("Add alert…", false, () => AddAlertRequested?.Invoke(SensorKey.For(hw, sensor))));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(Item("Reset min, max and average", false, () => ResetMinMaxRequested?.Invoke(id)));
 

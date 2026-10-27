@@ -65,7 +65,12 @@ Sidebar navigation and setting cards, with a live preview of the taskbar strip a
 
 - **Themes**: System (follows Windows), Light, Dark, and AMOLED black.
 - **Temperature unit**: °C or °F.
-- **Alerts**: a Windows notification when CPU or GPU temperature, or memory use, stays above your limit.
+- **Alerts on any sensor**: when a reading stays above or below your limit for a while (CPU or GPU temperature,
+  memory use, or any sensor: "fan below 300 RPM", "SSD above 60 °C"), show a notification (click it to open that
+  device in the dashboard), play a sound, and/or run a program of your choice. Programs run as you, without
+  administrator rights, unless you tick "as administrator". Repeats at most once per interval you choose while the
+  reading stays there; the last 100 alerts are listed in Settings → Alerts. Add one from Settings or from a
+  sensor's menu in the dashboard.
 - **Keyboard shortcut** to open the dashboard from anywhere (off by default).
 - **Primary GPU** choice on multi-GPU systems, with discrete/integrated labels.
 - **Start with Windows** without a UAC prompt at each sign-in (a scheduled task with highest privileges).
@@ -168,6 +173,7 @@ PCVitals.exe --bench bench.txt               # startup, per-device poll cost, CP
 PCVitals.exe --memprofile mem.txt            # private memory per library / sensor group
 PCVitals.exe --memprofile mem.txt pipeline   # the same for the app's actual lean path
 PCVitals.exe --bench-history hist.txt       # write, compact and load a synthetic month of saved history
+PCVitals.exe --alert-selftest alert.txt     # run one alert rule on live readings, including its "run a program" action
 PCVitals.exe --taskbar-report tb.txt         # taskbar geometry and how wide the strip would be
 PCVitals.exe --preview docs                  # render the README screenshots
 PCVitals.exe --replace                       # replace a running instance with this build
@@ -189,6 +195,7 @@ Found a bug? Please [open an issue](../../issues/new/choose) and attach the sens
 | `Core/HistoryStore.cs` | Recent and one-minute history, by sensor id with aliases for the headline series |
 | `Core/HistoryArchive.cs` / `Core/HistoryRecorder.cs` | Saved history: day files, series map, loading, clean-up, and the background writer |
 | `Core/HistoryCsv.cs` / `Core/HeadlineSeries.cs` | CSV export of saved history, and names for the headline series |
+| `Core/Alerts.cs` | Alert rules, the engine that decides when they go off, and the alert history |
 | `Core/NvmlFeed.cs` | Helper process that streams NVML readings while the dashboard is open |
 | `ProcessStats.cs` / `GpuProcessUsage.cs` | Top processes by CPU, memory and GPU |
 | `Vitals.cs` | Turns a snapshot into display items (labels, values, detail rows) shared by every view |
@@ -199,6 +206,7 @@ Found a bug? Please [open an issue](../../issues/new/choose) and attach the sens
 | `SettingsForm.cs` / `SettingsControls.cs` | Settings window and its toggle, card, dropdown and preview controls |
 | `SensorDialogs.cs` | The sensor picker and the rename prompt |
 | `HistoryDialogs.cs` | The history export dialog |
+| `AlertEditor.cs` / `AlertActions.cs` | The alert rule editor; notification text, sounds, and starting programs without admin rights |
 | `TrayContext.cs` | App lifetime, tray icons, menu, alerts and wiring |
 | `AppSettings.cs` | Settings persistence and the start-with-Windows task |
 | `Theme.cs` | Light, dark and AMOLED palettes, and value formatting |

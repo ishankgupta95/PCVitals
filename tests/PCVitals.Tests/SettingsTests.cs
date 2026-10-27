@@ -61,21 +61,22 @@ public sealed class SettingsTests : IDisposable
     }
 
     [Fact]
-    public void Version_2_settings_migrate_to_3_keeping_everything()
+    public void Version_2_settings_migrate_keeping_everything()
     {
         File.WriteAllText(FilePath, """
             { "Version": 2, "IntervalMs": 2000, "ColorTheme": "Dark", "AlertCpuEnabled": true, "AlertCpuTemp": 80,
               "WidgetItems": [ { "Kind": "Gpu", "Enabled": true, "Label": "VGA" } ] }
             """);
         var s = AppSettings.LoadFrom(FilePath);
-        Assert.Equal(3, s.Version);
+        Assert.Equal(AppSettings.CurrentVersion, s.Version);
         Assert.Equal(2000, s.IntervalMs);
         Assert.Equal(ThemeMode.Dark, s.ColorTheme);
-        Assert.True(s.AlertCpuEnabled);
-        Assert.Equal(80, s.AlertCpuTemp);
+        var cpu = s.AlertRules.Single(r => r.Series == "cputemp");
+        Assert.True(cpu.Enabled);
+        Assert.Equal(80, cpu.Threshold);
         Assert.Equal("VGA", s.WidgetItems[0].Label);
         Assert.Empty(s.Sensors);
-        Assert.Contains("\"Version\": 3", File.ReadAllText(FilePath));
+        Assert.Contains($"\"Version\": {AppSettings.CurrentVersion}", File.ReadAllText(FilePath));
     }
 
     [Fact]
@@ -107,7 +108,7 @@ public sealed class SettingsTests : IDisposable
         s.ColorTheme = ThemeMode.Amoled;
         s.Fahrenheit = true;
         s.WidgetScale = 85;
-        s.AlertCpuEnabled = true;
+        s.AlertRules[0].Enabled = true;
         s.GpuPowerPerPercent["NVIDIA GeForce RTX 5080"] = 3.98f;
         s.SaveTo(FilePath);
 
@@ -115,7 +116,7 @@ public sealed class SettingsTests : IDisposable
         Assert.Equal(ThemeMode.Amoled, back.ColorTheme);
         Assert.True(back.Fahrenheit);
         Assert.Equal(85, back.WidgetScale);
-        Assert.True(back.AlertCpuEnabled);
+        Assert.True(back.AlertRules[0].Enabled);
         Assert.Equal(3.98f, back.GpuPowerPerPercent["NVIDIA GeForce RTX 5080"], 3);
     }
 }

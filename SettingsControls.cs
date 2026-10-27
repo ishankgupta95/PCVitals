@@ -363,7 +363,11 @@ sealed class InputBox : Control
     }
 
     public new event EventHandler? TextChanged;
-    public string Value => _box.Text;
+    public string Value
+    {
+        get => _box.Text;
+        set => _box.Text = value;
+    }
     /// <summary>Raised for keys pressed in the text field (e.g. to move a list below it with the arrows).</summary>
     public event KeyEventHandler? FieldKeyDown
     {

@@ -21,6 +21,11 @@ interface ISettingsHost
     HistoryArchive? Archive { get; }
     long HistorySizeBytes { get; }
     Task DeleteHistoryAsync();
+    AlertLog AlertLog { get; }
+    /// <summary>When a rule last went off since PC Vitals started.</summary>
+    DateTime? LastFired(string ruleId);
+    /// <summary>Carries out a rule's actions now, as if it had gone off.</summary>
+    void TestAlert(AlertRule rule);
     /// <summary>Rebuilds the settings window (after a reset or theme change) on the given page.</summary>
     void ReopenSettings(string page);
 }
@@ -521,21 +526,94 @@ sealed class SettingsForm : Form
 
     void BuildAlerts(FlowLayoutPanel p)
     {
-        p.Controls.Add(Hint("Get a Windows notification when something stays above its limit for 15 seconds. Each alert repeats at most every 15 minutes. Click the notification to open the dashboard."));
-        var temps = Enumerable.Range(14, 7).Select(i => i * 5).ToArray(); // 70..100 °C
-        string[] TempItems() => temps.Select(t => Fmt.Temp(t)).ToArray();
+        p.Controls.Add(Hint("Get told when a reading stays above or below a limit: a notification, a sound, or a program of your choice. Click a notification to open the dashboard on that device. You can also add an alert from a sensor's menu in the dashboard."));
+        _alertsHost = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            AutoSize = true,
+            BackColor = Theme.Bg,
+            Margin = new Padding(0, 0, 0, 4),
+            Tag = "stretch-list",
+        };
+        p.Controls.Add(_alertsHost);
+        p.Controls.Add(new PillButton("Add alert…", () => EditAlert(null)) { Margin = new Padding(0, 4, 0, 8), AccessibleName = "Add an alert" });
 
-        p.Controls.Add(new Card("CPU temperature", "Alert when the processor runs hot.",
-            new AccessoryRow(Combo(TempItems(), Math.Max(0, Array.IndexOf(temps, _s.AlertCpuTemp)), 110, i => _s.AlertCpuTemp = temps[i]),
-                             Toggle(_s.AlertCpuEnabled, v => _s.AlertCpuEnabled = v)), ""));
-        p.Controls.Add(new Card("GPU temperature", "Alert when the primary graphics card runs hot.",
-            new AccessoryRow(Combo(TempItems(), Math.Max(0, Array.IndexOf(temps, _s.AlertGpuTemp)), 110, i => _s.AlertGpuTemp = temps[i]),
-                             Toggle(_s.AlertGpuEnabled, v => _s.AlertGpuEnabled = v)), ""));
-        var rams = new[] { 80, 85, 90, 95 };
-        p.Controls.Add(new Card("Memory usage", "Alert when memory is nearly full.",
-            new AccessoryRow(Combo(rams.Select(r => $"{r}%").ToArray(), Math.Max(0, Array.IndexOf(rams, _s.AlertRamPercent)), 110, i => _s.AlertRamPercent = rams[i]),
-                             Toggle(_s.AlertRamEnabled, v => _s.AlertRamEnabled = v)), ""));
+        p.Controls.Add(Section("Recent alerts"));
+        _alertHistory = new Label { AutoSize = true, MaximumSize = new Size(760, 0), ForeColor = Theme.TextDim, Tag = "dim", Margin = new Padding(0, 0, 0, 8) };
+        p.Controls.Add(_alertHistory);
+        p.Controls.Add(new PillButton("Clear history", () =>
+        {
+            _host.AlertLog.Clear();
+            AlertsChanged();
+        }));
+        BuildAlertRows();
     }
+
+    FlowLayoutPanel? _alertsHost;
+    Label? _alertHistory;
+
+    void BuildAlertRows()
+    {
+        if (_alertsHost is not { } host) return;
+        host.SuspendLayout();
+        foreach (Control c in host.Controls.Cast<Control>().ToList()) c.Dispose();
+        host.Controls.Clear();
+        var snap = _host.Latest;
+        foreach (var rule in _s.AlertRules.ToList())
+        {
+            var name = AlertText.Target(rule, snap, _s);
+            var last = _host.LastFired(rule.Id) is { } t ? $" · went off at {t:HH:mm}" : "";
+            var now = snap != null && rule.ValueIn(snap) is { } v ? $" · now {AlertText.Value(rule.Type, v)}" : "";
+            var edit = new PillButton("Edit…", () => EditAlert(rule)) { AccessibleName = $"Edit the {name} alert" };
+            var test = new PillButton("Test", () => _host.TestAlert(rule)) { AccessibleName = $"Test the {name} alert" };
+            var remove = new PillButton("", () => RemoveAlert(rule), 34) { Glyph = "", AccessibleName = $"Remove the {name} alert" };
+            var toggle = Toggle(rule.Enabled, on => rule.Enabled = on);
+            toggle.AccessibleName = $"{name} alert on";
+            host.Controls.Add(new Card(name, $"{char.ToUpperInvariant(AlertText.Condition(rule)[0])}{AlertText.Condition(rule)[1..]}{now}{last}\n{AlertText.Actions(rule)}",
+                                       new AccessoryRow(edit, test, remove, toggle)));
+        }
+        if (_s.AlertRules.Count == 0)
+            host.Controls.Add(Hint("No alerts yet."));
+        host.ResumeLayout();
+        if (host.Parent is FlowLayoutPanel page) Stretch(page);
+        UpdateAlertHistory();
+    }
+
+    void UpdateAlertHistory()
+    {
+        if (_alertHistory == null) return;
+        var entries = _host.AlertLog.Entries;
+        _alertHistory.Text = entries.Count == 0
+            ? "Nothing yet."
+            : string.Join("\n", entries.TakeLast(12).Reverse().Select(e => $"{e.Time:ddd d MMM HH:mm}   {e.Name}: {e.Text}"))
+              + (entries.Count > 12 ? $"\n…and {entries.Count - 12} earlier (the last {AlertLog.Capacity} are kept)." : "");
+    }
+
+    void EditAlert(AlertRule? rule)
+    {
+        var edited = AlertEditor.Edit(this, rule ?? new AlertRule { Series = "cputemp", Threshold = 90 }, () => _host.Latest, _s, _host.TestAlert);
+        if (edited == null) return;
+        int i = rule == null ? -1 : _s.AlertRules.FindIndex(r => r.Id == rule.Id);
+        if (i >= 0) _s.AlertRules[i] = edited;
+        else _s.AlertRules.Add(edited);
+        BuildAlertRows();
+        Changed();
+    }
+
+    void RemoveAlert(AlertRule rule)
+    {
+        _s.AlertRules.RemoveAll(r => r.Id == rule.Id);
+        // Rebuild after this click finishes; the clicked button is one of the controls being replaced.
+        BeginInvoke(() =>
+        {
+            BuildAlertRows();
+            Changed();
+        });
+    }
+
+    /// <summary>An alert went off, was tested, or rules changed elsewhere (the dashboard).</summary>
+    public void AlertsChanged() => BuildAlertRows();
 
     // ---- Appearance -------------------------------------------------------------------------
 

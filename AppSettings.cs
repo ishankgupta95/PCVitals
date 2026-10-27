@@ -66,7 +66,7 @@ public sealed class SensorPref
 
 public sealed class AppSettings
 {
-    internal const int CurrentVersion = 3;
+    internal const int CurrentVersion = 4;
     static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PCVitals");
     static readonly string FilePath = Path.Combine(Dir, "settings.json");
     static readonly JsonSerializerOptions Json = new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
@@ -112,13 +112,16 @@ public sealed class AppSettings
     public bool HistoryEnabled { get; set; } = true;
     public int HistoryRetentionDays { get; set; } = 30;
 
-    // Alerts (Windows notifications when a reading stays above its limit)
-    public bool AlertCpuEnabled { get; set; }
-    public int AlertCpuTemp { get; set; } = 90;
-    public bool AlertGpuEnabled { get; set; }
-    public int AlertGpuTemp { get; set; } = 85;
-    public bool AlertRamEnabled { get; set; }
-    public int AlertRamPercent { get; set; } = 95;
+    // Alerts
+    public List<AlertRule> AlertRules { get; set; } = DefaultAlertRules();
+
+    // The three fixed alerts of settings v2/v3, read only to migrate them into rules.
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? AlertCpuEnabled { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? AlertCpuTemp { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? AlertGpuEnabled { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? AlertGpuTemp { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? AlertRamEnabled { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? AlertRamPercent { get; set; }
     /// <summary>Learned watts per 1% of NVAPI power, per NVIDIA GPU name (see HardwareService).</summary>
     public Dictionary<string, float> GpuPowerPerPercent { get; set; } = new();
     public HashSet<string> Collapsed { get; set; } = new();
@@ -174,15 +177,25 @@ public sealed class AppSettings
 
     public void UnpinSensor(string sensorId) => WidgetItems.RemoveAll(i => i.Kind == WidgetKind.Sensor && i.Sensor?.Id == sensorId);
 
-    /// <summary>Sensors to keep history for: pinned (and switched on) and favourites, by key.</summary>
+    /// <summary>Sensors to keep history for: pinned (and switched on), watched by alerts, and favourites, by key.</summary>
     public List<SensorKey> TrackedSensors(Snapshot? snap)
     {
         var keys = WidgetItems.Where(i => i.Kind == WidgetKind.Sensor && i.Enabled && i.Sensor != null).Select(i => i.Sensor!).ToList();
+        foreach (var rule in AlertRules)
+            if (rule.Enabled && rule.Sensor is { } key && keys.All(k => k.Id != key.Id)) keys.Add(key);
         if (snap != null)
             foreach (var (id, pref) in Sensors)
                 if (pref.Favorite && keys.All(k => k.Id != id) && snap.Catalog[id] is { } e) keys.Add(e.Key);
         return keys;
     }
+
+    /// <summary>CPU temperature, GPU temperature and memory usage rules: what the app had before alerts on any sensor (off by default).</summary>
+    public static List<AlertRule> DefaultAlertRules(bool cpu = false, int cpuTemp = 90, bool gpu = false, int gpuTemp = 85, bool ram = false, int ramPercent = 95) => new()
+    {
+        new() { Series = "cputemp", Threshold = cpuTemp, Enabled = cpu },
+        new() { Series = "gputemp", Threshold = gpuTemp, Enabled = gpu },
+        new() { Series = "ram", Threshold = ramPercent, Enabled = ram },
+    };
 
     public static AppSettings CreateDefault() => new() { Version = CurrentVersion };
 
@@ -211,11 +224,19 @@ public sealed class AppSettings
         }
         else if (settings.Version < CurrentVersion)
         {
-            // v3 only added per-sensor preferences; everything else carries over as is.
+            // v3 added per-sensor preferences (nothing to convert). v4 turned the three fixed alerts into rules.
+            if (settings.Version < 4)
+                settings.AlertRules = DefaultAlertRules(settings.AlertCpuEnabled ?? false, settings.AlertCpuTemp ?? 90,
+                                                        settings.AlertGpuEnabled ?? false, settings.AlertGpuTemp ?? 85,
+                                                        settings.AlertRamEnabled ?? false, settings.AlertRamPercent ?? 95);
+            settings.AlertCpuEnabled = settings.AlertGpuEnabled = settings.AlertRamEnabled = null;
+            settings.AlertCpuTemp = settings.AlertGpuTemp = settings.AlertRamPercent = null;
             settings.Version = CurrentVersion;
             settings.SaveTo(path);
         }
         settings.Sensors ??= new();
+        settings.AlertRules ??= new();
+        settings.AlertRules.RemoveAll(r => r == null! || (r.Sensor == null && (r.Series == null || !AlertRule.SeriesTargets.ContainsKey(r.Series))));
 
         // Keep the item list complete if new kinds were added in an update.
         foreach (var def in DefaultWidgetItems())

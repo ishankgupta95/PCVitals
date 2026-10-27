@@ -31,6 +31,15 @@ static class Program
                 return 1;
             }
         }
+        if (args.Length >= 2 && args[0] == "--alert-selftest")
+        {
+            try { return AlertSelfTest(args[1]); }
+            catch (Exception ex)
+            {
+                File.WriteAllText(args[1], ex.ToString());
+                return 1;
+            }
+        }
         if (args.Length >= 2 && args[0] == "--bench-history")
         {
             try { return BenchHistory(args[1]); }
@@ -226,6 +235,55 @@ static class Program
         {
             return 1;
         }
+    }
+
+    /// <summary>
+    /// Runs one alert rule against live readings: memory usage above 1% for 3 seconds (always true),
+    /// whose action runs cmd.exe to write a marker file. Also starts the same command through the
+    /// desktop shell (the path used when PC Vitals is elevated). Reports what happened.
+    /// </summary>
+    static int AlertSelfTest(string path)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Admin: {IsAdmin()}");
+        var marker = Path.Combine(Path.GetTempPath(), $"pcvitals-alert-{Guid.NewGuid():N}.txt");
+        var shellMarker = marker.Replace(".txt", "-shell.txt");
+        var rule = new AlertRule
+        {
+            Series = "ram", Threshold = 1, DurationSeconds = 3, CooldownMinutes = 15, Notify = false,
+            RunProgram = Path.Combine(Environment.SystemDirectory, "cmd.exe"), RunArguments = $"/c echo fired > \"{marker}\"",
+        };
+        using var hw = new HardwareService(lean: true);
+        var engine = new AlertEngine();
+        var start = DateTime.Now;
+        for (int i = 0; i < 8; i++)
+        {
+            var snap = hw.UpdateOnce();
+            foreach (var e in engine.Evaluate(new[] { rule }, snap.Time, r => r.ValueIn(snap)))
+            {
+                sb.AppendLine($"{(snap.Time - start).TotalSeconds:0.0} s: {(e.Fired ? "fired" : "recovered")} at {e.Value:0.0}% ({AlertText.Condition(rule)})");
+                if (e.Fired) sb.AppendLine("  run program: " + (AlertActions.RunProgram(rule) ?? "started"));
+            }
+            Thread.Sleep(1000);
+        }
+        try
+        {
+            DesktopShell.Run(rule.RunProgram, $"/c echo fired > \"{shellMarker}\"", Environment.SystemDirectory);
+            sb.AppendLine("Desktop shell launch: started");
+        }
+        catch (Exception ex)
+        {
+            sb.AppendLine("Desktop shell launch failed: " + ex.Message);
+        }
+        Thread.Sleep(2000);
+        foreach (var (name, file) in new[] { ("Program action", marker), ("Desktop shell", shellMarker) })
+        {
+            sb.AppendLine($"{name} wrote its marker: {File.Exists(file)}");
+            try { File.Delete(file); }
+            catch { }
+        }
+        File.WriteAllText(path, sb.ToString());
+        return 0;
     }
 
     /// <summary>
@@ -544,6 +602,9 @@ static class Program
                      PreviewSensor(first, SensorType.Power, "Package"),
                  })
             if (fav != null) settings.UpdateSensor(fav.Id, p => p.Favorite = true);
+        // An alert on the pinned sensor next to the built-in ones, with the CPU temperature one switched on.
+        if (pinned != null) settings.AlertRules.Add(new AlertRule { Sensor = pinned.Key, Threshold = 80, DurationSeconds = 30, Sound = "Exclamation" });
+        settings.AlertRules[0].Enabled = true;
         hw.TrackedSensors = settings.TrackedSensors(first);
 
         for (int i = 0; i < 40; i++)
@@ -644,7 +705,7 @@ static class Program
         foreach (var (file, page, mode) in new[]
                  {
                      ("settings-taskbar.png", "taskbar", ThemeMode.Dark), ("settings-appearance.png", "appearance", ThemeMode.Dark),
-                     ("settings-graphics-light.png", "graphics", ThemeMode.Light),
+                     ("settings-graphics-light.png", "graphics", ThemeMode.Light), ("settings-alerts.png", "alerts", ThemeMode.Dark),
                  })
         {
             Theme.Apply(mode);
@@ -671,6 +732,19 @@ static class Program
             }
             bmp.Save(Path.Combine(dir, file), ImageFormat.Png);
             form.Close();
+        }
+
+        // The alert editor, on the sensor rule.
+        Theme.Apply(ThemeMode.Dark);
+        using (var editor = new AlertEditor(settings.AlertRules[^1], () => snap, settings, _ => { })
+               { StartPosition = FormStartPosition.Manual, Location = new Point(40, 40), ShowInTaskbar = false, Opacity = 0.01 })
+        {
+            editor.Show();
+            Application.DoEvents();
+            using var bmp = new Bitmap(editor.Width, editor.Height);
+            editor.DrawToBitmap(bmp, new Rectangle(0, 0, editor.Width, editor.Height));
+            bmp.Save(Path.Combine(dir, "alert-editor.png"), ImageFormat.Png);
+            editor.Close();
         }
         return 0;
     }
@@ -730,6 +804,9 @@ static class Program
         public HistoryArchive? Archive => null;
         public long HistorySizeBytes => 1_600_000;
         public Task DeleteHistoryAsync() => Task.CompletedTask;
+        public AlertLog AlertLog { get; } = new(Path.Combine(Path.GetTempPath(), "pcvitals-preview-alerts.json"));
+        public DateTime? LastFired(string ruleId) => null;
+        public void TestAlert(AlertRule rule) { }
         public void ReopenSettings(string page) { }
     }
 }

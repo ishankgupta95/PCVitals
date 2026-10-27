@@ -17,12 +17,6 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         [TrayMetric.Power] = new("CPU + GPU power", "WATT", Theme.DarkPalette.Power),
     };
 
-    sealed class AlertState
-    {
-        public int SamplesAbove;
-        public DateTime LastShown = DateTime.MinValue;
-    }
-
     readonly AppSettings _settings;
     readonly bool _isAdmin;
     readonly HardwareService _hw = new(lean: true);
@@ -37,7 +31,10 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     readonly Dictionary<TrayMetric, NotifyIcon> _icons = new();
     readonly Dictionary<TrayMetric, (IntPtr Handle, string Key)> _hIcons = new();
     readonly Dictionary<int, ToolStripMenuItem> _intervalItems = new();
-    readonly Dictionary<string, AlertState> _alerts = new();
+    readonly AlertEngine _alertEngine = new();
+    readonly AlertLog _alertLog = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PCVitals", "alert-history.json"));
+    /// <summary>Copies of the rules for the poll thread; replaced (not changed) when settings change.</summary>
+    AlertRule[] _alertRules = Array.Empty<AlertRule>();
     NotifyIcon? _logo;
     IntPtr _logoHandle;
     ToolStripMenuItem _autostartItem = null!, _widgetItem = null!;
@@ -66,6 +63,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             _settingsForm?.SensorItemsChanged();
         };
         _dash.ResetMinMaxRequested += _hw.ResetMinMax;
+        _dash.AddAlertRequested += AddAlertFor;
         _dash.VisibleChanged += (_, _) =>
         {
             _hw.DetailedMode = _dash.Visible;
@@ -113,6 +111,14 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             catch (InvalidOperationException) { }
         };
         ApplyHistory(seed: true);
+        // Alerts are judged on the poll thread (cheap); their actions run on the UI thread.
+        _hw.AddConsumer(new SnapshotConsumer(snap =>
+        {
+            var events = _alertEngine.Evaluate(Volatile.Read(ref _alertRules), snap.Time, r => r.ValueIn(snap));
+            if (events.Count == 0 || _exiting) return;
+            try { _dash.BeginInvoke(() => OnAlerts(events, snap)); }
+            catch (InvalidOperationException) { }
+        }));
         _hw.AddConsumer(new SnapshotConsumer(snap =>
         {
             if (_exiting) return;
@@ -209,6 +215,37 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
 
     public HistoryArchive? Archive => _settings.HistoryEnabled ? _archive : null;
 
+    /// <summary>"Add alert…" from a sensor in the dashboard: the rule editor, starting on that sensor.</summary>
+    void AddAlertFor(SensorKey key)
+    {
+        _dash.HoldOpen = true;
+        try
+        {
+            var rule = AlertEditor.Edit(_dash, new AlertRule { Sensor = key }, () => _hw.Latest, _settings, TestAlert);
+            if (rule == null) return;
+            _settings.AlertRules.Add(rule);
+            _settings.Save();
+            SettingsChanged();
+            _settingsForm?.AlertsChanged();
+        }
+        finally
+        {
+            _dash.HoldOpen = false;
+            if (_dash.Visible) _dash.Activate();
+        }
+    }
+
+    public AlertLog AlertLog => _alertLog;
+    public DateTime? LastFired(string ruleId) => _alertEngine.LastFired(ruleId);
+
+    public void TestAlert(AlertRule rule)
+    {
+        var snap = _hw.Latest;
+        var value = snap != null && rule.ValueIn(snap) is { } v ? AlertText.Value(rule.Type, v) : "not available";
+        RunAlertActions(rule, AlertText.Target(rule, snap, _settings), $"Test: now {value}; alerts when {AlertText.Condition(rule)}.", DateTime.Now, snap);
+        _settingsForm?.AlertsChanged();
+    }
+
     void ApplyToService()
     {
         _hw.IntervalMs = _settings.IntervalMs;
@@ -219,6 +256,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         _hw.NeedSecondGpu = Shown(WidgetKind.SecondGpu);
         _hw.NeedBattery = Shown(WidgetKind.Battery);
         _hw.TrackedSensors = _settings.TrackedSensors(_hw.Latest);
+        Volatile.Write(ref _alertRules, _settings.AlertRules.Select(r => r.Clone()).ToArray());
     }
 
     void SyncExtraWidgets()
@@ -271,7 +309,6 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         foreach (var extra in _extraWidgets.Values) extra.SetSnapshot(snap);
         if (_dash.Visible) _dash.SetSnapshot(snap);
         _settingsForm?.SetSnapshot(snap);
-        CheckAlerts(snap.Summary);
 
         _snapshots++;
         if (_snapshots == 1)
@@ -290,31 +327,31 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
 
     // ---- Alerts -----------------------------------------------------------------------------
 
-    void CheckAlerts(Summary s)
+    void OnAlerts(List<AlertEvent> events, Snapshot snap)
     {
-        Check("cpu", _settings.AlertCpuEnabled, s.CpuTemp, _settings.AlertCpuTemp, WidgetKind.Cpu,
-              "CPU is running hot", v => $"{s.CpuShortName} is at {Fmt.Temp(v)} (your limit is {Fmt.Temp(_settings.AlertCpuTemp)}).");
-        Check("gpu", _settings.AlertGpuEnabled, s.Gpu?.Temp, _settings.AlertGpuTemp, WidgetKind.Gpu,
-              "GPU is running hot", v => $"{s.Gpu?.ShortName} is at {Fmt.Temp(v)} (your limit is {Fmt.Temp(_settings.AlertGpuTemp)}).");
-        Check("ram", _settings.AlertRamEnabled, s.RamLoad, _settings.AlertRamPercent, WidgetKind.Memory,
-              "Memory is almost full", v => $"{v:0}% in use ({s.RamUsedGb:0.0} of {s.RamTotalGb:0} GB).");
+        foreach (var e in events)
+        {
+            var name = AlertText.Target(e.Rule, snap, _settings);
+            var value = AlertText.Value(e.Rule.Type, e.Value);
+            if (!e.Fired)
+            {
+                _alertLog.Add(new AlertLog.Entry(e.Time, e.Rule.Id, name, $"Back to {value}"));
+                continue;
+            }
+            RunAlertActions(e.Rule, name, $"Now {value}: {AlertText.Condition(e.Rule)}.", e.Time, snap);
+        }
+        _settingsForm?.AlertsChanged();
     }
 
-    /// <summary>Notifies once a reading has stayed above its limit for ~15 s; at most every 15 min.</summary>
-    void Check(string key, bool enabled, float? value, float limit, WidgetKind page, string title, Func<float, string> text)
+    void RunAlertActions(AlertRule rule, string name, string text, DateTime time, Snapshot? snap)
     {
-        if (!_alerts.TryGetValue(key, out var state)) _alerts[key] = state = new AlertState();
-        if (!enabled || value is not { } v)
-        {
-            state.SamplesAbove = 0;
-            return;
-        }
-        if (v > limit) state.SamplesAbove++;
-        else if (v < limit - 3) state.SamplesAbove = 0; // a little hysteresis so it doesn't flap
-        int needed = Math.Max(1, 15000 / Math.Max(100, _settings.IntervalMs));
-        if (state.SamplesAbove < needed || DateTime.Now - state.LastShown < TimeSpan.FromMinutes(15)) return;
-        state.LastShown = DateTime.Now;
-        ShowNotification(title, text(v), ToolTipIcon.Warning, page);
+        if (AlertActions.RunProgram(rule) is { } error) text += $" Couldn't run {Path.GetFileName(rule.RunProgram)}: {error}";
+        AlertActions.PlaySound(rule.Sound);
+        var page = AlertText.Page(rule, snap);
+        if (rule.Notify)
+            ShowNotification($"{name} is {(rule.Condition == AlertCondition.Above ? "high" : "low")}", text, ToolTipIcon.Warning, null,
+                             () => ShowDashboard(null, false, page));
+        _alertLog.Add(new AlertLog.Entry(time, rule.Id, name, text));
     }
 
     void ShowNotification(string title, string text, ToolTipIcon icon, WidgetKind? page, Action? onClick = null)

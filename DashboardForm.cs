@@ -14,6 +14,7 @@ sealed class DashboardForm : Form
     /// <summary>The user changed a sensor (favourite, rename, hide, pin) from the dashboard.</summary>
     public event Action? SensorsChanged;
     public event Action<string>? ResetMinMaxRequested;
+    public event Action<SensorKey>? AddAlertRequested;
     /// <summary>True while the dashboard shows its own dialog, so losing focus to it doesn't hide the flyout.</summary>
     public bool HoldOpen { get; set; }
 
@@ -39,6 +40,7 @@ sealed class DashboardForm : Form
         _view.SettingsRequested += () => SettingsRequested?.Invoke();
         _view.SensorsChanged += () => SensorsChanged?.Invoke();
         _view.ResetMinMaxRequested += id => ResetMinMaxRequested?.Invoke(id);
+        _view.AddAlertRequested += key => AddAlertRequested?.Invoke(key);
         Controls.Add(_view);
     }
 

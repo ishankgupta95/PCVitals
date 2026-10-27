@@ -210,6 +210,9 @@ static class Fmt
 
     public static float TempValue(float celsius) => Fahrenheit ? celsius * 9 / 5 + 32 : celsius;
 
+    /// <summary>A temperature typed in the display unit, back in °C.</summary>
+    public static float CelsiusFromDisplay(float value) => Fahrenheit ? (value - 32) * 5 / 9 : value;
+
     /// <summary>"52°C" / "126°F", or "--°C" when unknown.</summary>
     public static string Temp(float? celsius, string format = "0") =>
         celsius is { } c ? TempValue(c).ToString(format) + TempUnit : "--" + TempUnit;
