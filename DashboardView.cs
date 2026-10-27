@@ -594,23 +594,32 @@ sealed class DashboardView : Control
         // Every sensor for this device.
         y += S(6);
         Gfx.Text(g, "ALL SENSORS", _f.Label, Theme.TextFaint, new Rectangle(x + S(4), y, w, S(16)));
-        var toggle = _settings.ShowAdvancedSensors ? "Hide advanced" : "Show advanced";
-        int tw = Gfx.TextWidth(g, toggle, _f.Small);
-        var tr = new Rectangle(x + w - tw - S(14), y - S(5), tw + S(14), S(24));
-        if (tr.Contains(_mouse)) Gfx.FillRounded(g, tr, S(6), Theme.SurfaceHover);
-        Gfx.Text(g, toggle, _f.Small, Theme.Cpu, tr, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-        AddHit(tr, toggle + " sensors", () =>
+        // Only offer the toggles where they change something, with how many sensors they affect.
+        int right = x + w;
+        // Advanced sensors that would actually appear: not hidden by the user, not the per-thread loads (drawn as bars).
+        int advancedCount = page.Readings.Sum(h => h.Sensors.Count(s => IsAdvanced(s) && !IsThreadLoad(h, s) &&
+                                                                         (_settings.ShowHiddenSensors || !_settings.IsHidden(s.Id))));
+        if (advancedCount > 0)
         {
-            _settings.ShowAdvancedSensors = !_settings.ShowAdvancedSensors;
-            _settings.Save();
-            Invalidate();
-        });
+            var toggle = _settings.ShowAdvancedSensors ? $"Hide advanced ({advancedCount})" : $"Show advanced ({advancedCount})";
+            int tw = Gfx.TextWidth(g, toggle, _f.Small);
+            var tr = new Rectangle(right - tw - S(14), y - S(5), tw + S(14), S(24));
+            if (tr.Contains(_mouse)) Gfx.FillRounded(g, tr, S(6), Theme.SurfaceHover);
+            Gfx.Text(g, toggle, _f.Small, Theme.Cpu, tr, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            AddHit(tr, $"{(_settings.ShowAdvancedSensors ? "Hide" : "Show")} {advancedCount} advanced sensors", () =>
+            {
+                _settings.ShowAdvancedSensors = !_settings.ShowAdvancedSensors;
+                _settings.Save();
+                Invalidate();
+            });
+            right = tr.Left - S(6);
+        }
         int hiddenCount = page.Readings.SelectMany(h => h.Sensors).Count(s => _settings.IsHidden(s.Id));
         if (hiddenCount > 0 || _settings.ShowHiddenSensors)
         {
             var hiddenToggle = _settings.ShowHiddenSensors ? "Leave out hidden" : $"Show hidden ({hiddenCount})";
             int hw2 = Gfx.TextWidth(g, hiddenToggle, _f.Small);
-            var hr = new Rectangle(tr.Left - hw2 - S(20), tr.Top, hw2 + S(14), tr.Height);
+            var hr = new Rectangle(right - hw2 - S(14), y - S(5), hw2 + S(14), S(24));
             if (hr.Contains(_mouse)) Gfx.FillRounded(g, hr, S(6), Theme.SurfaceHover);
             Gfx.Text(g, hiddenToggle, _f.Small, Theme.Cpu, hr, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             AddHit(hr, _settings.ShowHiddenSensors ? "Leave out hidden sensors" : $"Show {hiddenCount} hidden sensors", () =>
@@ -1017,12 +1026,15 @@ sealed class DashboardView : Control
                                               s.Name.StartsWith("Warning", StringComparison.OrdinalIgnoreCase) ||
                                               s.Name.StartsWith("Critical", StringComparison.OrdinalIgnoreCase)));
 
+    /// <summary>Per-thread CPU load: shown as the bar graph above the sensor list, not as 16+ rows.</summary>
+    static bool IsThreadLoad(HardwareReading hw, SensorReading s) =>
+        hw.Type == HardwareType.Cpu && s.Type == SensorType.Load && s.Name.StartsWith("CPU Core #", StringComparison.OrdinalIgnoreCase);
+
     int DrawSection(Graphics g, HardwareReading hw, int x, int y, int w)
     {
         bool collapsed = _settings.Collapsed.Contains(hw.Id);
         var sensors = (_settings.ShowAdvancedSensors ? hw.Sensors : hw.Sensors.Where(s => !IsAdvanced(s)))
-            // Per-thread load is shown as the bar graph above, not 16+ rows.
-            .Where(s => !(hw.Type == HardwareType.Cpu && s.Type == SensorType.Load && s.Name.StartsWith("CPU Core #", StringComparison.OrdinalIgnoreCase)))
+            .Where(s => !IsThreadLoad(hw, s))
             .Where(s => _settings.ShowHiddenSensors || !_settings.IsHidden(s.Id))
             .ToList();
         if (sensors.Count == 0) return y - S(8);

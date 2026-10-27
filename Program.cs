@@ -692,6 +692,27 @@ static class Program
             bmp.Save(Path.Combine(dir, file), ImageFormat.Png);
         }
 
+        // Check: which pages offer the advanced / hidden sensor toggles (only those where they change the list).
+        {
+            Theme.Apply(ThemeMode.Dark);
+            var report = new StringBuilder();
+            using var view = new DashboardView(settings, IsAdmin()) { HistoryProvider = hw.GetHistory };
+            var pageKeys = new[] { "cpu", "memory", "network", "board" }.Concat(snap.Summary.Gpus.Select(g => "gpu:" + g.Id)).Concat(snap.Summary.Disks.Select(d => "disk:" + d.Id));
+            foreach (var key in pageKeys)
+            {
+                settings.DashboardPage = key;
+                view.Size = new Size(1200, 20000); // tall enough that the whole sensor list is on screen
+                view.SetSnapshot(snap);
+                using (var bmp = new Bitmap(1200, 20000)) view.DrawToBitmap(bmp, new Rectangle(0, 0, 1200, 20000));
+                var acc = view.AccessibilityObject;
+                var toggles = Enumerable.Range(0, acc.GetChildCount()).Select(i => acc.GetChild(i)?.Name ?? "")
+                    .Where(n => n.Contains("advanced sensors") || n.Contains("hidden sensors")).ToList();
+                report.AppendLine($"{key}: {(toggles.Count == 0 ? "no toggles" : string.Join("; ", toggles))}");
+            }
+            File.WriteAllText(Path.Combine(dir, "dashboard-toggles.txt"), report.ToString());
+            settings.DashboardPage = "overview";
+        }
+
         // A week of saved history on the CPU page. Uses the real archive when it has a week, else a made-up one.
         Theme.Apply(ThemeMode.Dark);
         var weekDir = Path.Combine(Path.GetTempPath(), "pcvitals-preview-history");
