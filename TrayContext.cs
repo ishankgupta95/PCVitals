@@ -331,7 +331,8 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
                     _panelMenuTarget = panel;
                     _panelMenu.Show(p);
                 };
-                panel.FormClosed += (_, _) => Exit();
+                // Windows closing it (shutdown) means exit; a panel removed in Settings is closed by us (AllowClose).
+                panel.FormClosed += (_, _) => { if (!panel.AllowClose) Exit(); };
                 _panels.Add(panel);
             }
             _panels[i].Apply(_settings.Panels[i]);
