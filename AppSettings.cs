@@ -69,7 +69,7 @@ public sealed class AppSettings
     internal const int CurrentVersion = 5;
     static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PCVitals");
     static readonly string FilePath = Path.Combine(Dir, "settings.json");
-    static readonly JsonSerializerOptions Json = new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
+    internal static readonly JsonSerializerOptions Json = new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
 
     /// <summary>0 when missing from the file, i.e. a v1 settings file.</summary>
     public int Version { get; set; }

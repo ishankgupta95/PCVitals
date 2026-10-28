@@ -28,6 +28,8 @@ interface ISettingsHost
     void TestAlert(AlertRule rule);
     /// <summary>Rebuilds the settings window (after a reset or theme change) on the given page.</summary>
     void ReopenSettings(string page);
+    /// <summary>Opens the layout editor for a panel (by <see cref="PanelLayout.Id"/>).</summary>
+    void EditPanel(string id);
 }
 
 /// <summary>
@@ -353,11 +355,30 @@ sealed class SettingsForm : Form
 
     FlowLayoutPanel? _panelPage;
 
+    // Which of the panels this page shows (there can be several).
+    int _panelIndex;
+
     /// <summary>The panel being edited, created from the Compact preset the first time something is changed.</summary>
-    PanelLayout EditedPanel => PanelPresets.EnsurePanel(_s, _host.Latest);
+    PanelLayout EditedPanel
+    {
+        get
+        {
+            PanelPresets.EnsurePanel(_s, _host.Latest);
+            _panelIndex = Math.Clamp(_panelIndex, 0, _s.Panels.Count - 1);
+            return _s.Panels[_panelIndex];
+        }
+    }
 
     /// <summary>The panel's settings to show, without creating one just by looking.</summary>
-    PanelLayout PanelOrDefault => _s.Panels.FirstOrDefault() ?? PanelPresets.Build("compact", _host.Latest);
+    PanelLayout PanelOrDefault => _s.Panels.Count > 0 ? _s.Panels[Math.Clamp(_panelIndex, 0, _s.Panels.Count - 1)] : PanelPresets.Build("compact", _host.Latest);
+
+    /// <summary>Shows a panel's settings on this page (after the editor or the tray changed which exist).</summary>
+    public void ShowPanel(string id)
+    {
+        int i = _s.Panels.FindIndex(p => p.Id == id);
+        if (i >= 0) _panelIndex = i;
+        PanelChanged();
+    }
 
     /// <summary>The panel was changed from its menu or the tray: show the new values.</summary>
     public void PanelChanged()
@@ -379,6 +400,56 @@ sealed class SettingsForm : Form
         });
     }
 
+    void AddPanel()
+    {
+        PanelPresets.EnsurePanel(_s, _host.Latest);
+        var panel = PanelPresets.Build("compact", _host.Latest);
+        panel.Enabled = true;
+        panel.Name = $"Panel {_s.Panels.Count + 1}";
+        // Down and to the left of the first, rather than on top of it.
+        panel.Position = new Point(40 + 40 * _s.Panels.Count, 80 + 40 * _s.Panels.Count);
+        _s.Panels.Add(panel);
+        _panelIndex = _s.Panels.Count - 1;
+        Changed();
+        PanelChanged();
+    }
+
+    void RemovePanel()
+    {
+        if (_s.Panels.Count == 0) return;
+        var panel = EditedPanel;
+        if (MessageBox.Show(this, $"Remove the panel \"{panel.Name}\"? Its layout is deleted (export it first to keep a copy).", "PC Vitals",
+                            MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        _s.Panels.Remove(panel);
+        _panelIndex = Math.Max(0, _panelIndex - 1);
+        Changed();
+        PanelChanged();
+    }
+
+    void ImportPanel()
+    {
+        using var dialog = new OpenFileDialog { Filter = PanelExchange.FileFilter, Title = "Import a panel layout" };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            var layout = PanelExchange.Import(dialog.FileName);
+            if (_s.Panels.Count > 0 && MessageBox.Show(this, $"Add \"{layout.Name}\" as a new panel? Choose No to replace the layout of \"{EditedPanel.Name}\".",
+                                                        "PC Vitals", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.No)
+                EditedPanel.ApplyPreset(layout);
+            else
+            {
+                _s.Panels.Add(layout);
+                _panelIndex = _s.Panels.Count - 1;
+            }
+            Changed();
+            PanelChanged();
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(this, ex.Message, "Couldn't import the layout", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
     void BuildPanel(FlowLayoutPanel p)
     {
         _panelPage = p;
@@ -388,6 +459,19 @@ sealed class SettingsForm : Form
     void BuildPanelBody(FlowLayoutPanel p)
     {
         var current = PanelOrDefault;
+        if (_s.Panels.Count > 0)
+        {
+            var panelNames = _s.Panels.Select((x, i) => $"{i + 1}. {x.Name}{(x.Enabled ? "" : " (hidden)")}").ToArray();
+            var choose = new Dropdown(panelNames, Math.Clamp(_panelIndex, 0, panelNames.Length - 1), 190);
+            choose.SelectedIndexChanged += (_, _) =>
+            {
+                _panelIndex = choose.SelectedIndex;
+                PanelChanged();
+            };
+            var add = new PillButton("Add panel", AddPanel) { AccessibleName = "Add another desktop panel" };
+            var remove = new PillButton("Remove", RemovePanel) { AccessibleName = "Remove this desktop panel" };
+            p.Controls.Add(new Card("Panel", "Each panel has its own layout and place on screen.", new AccessoryRow(choose, add, remove), ""));
+        }
         var preview = new LivePreview(c =>
         {
             var layout = PanelOrDefault;
@@ -412,7 +496,14 @@ sealed class SettingsForm : Form
                                 Toggle(current.Enabled && _s.Panels.Count > 0, v => EditedPanel.Enabled = v), ""));
 
         p.Controls.Add(Section("Layout"));
-        p.Controls.Add(Hint("Pick a layout. Readings for devices this PC doesn't have are left out. Choosing your own readings and arranging the tiles comes in a later update."));
+        p.Controls.Add(new Card("Edit the layout", "Choose any readings, drag tiles around and resize them, mix numbers, bars, gauges and graphs, add text, a clock or pictures. Layouts can be exported and imported.",
+                                new AccessoryRow(new PillButton("Edit layout…", () =>
+                                {
+                                    var id = EditedPanel.Id;
+                                    Changed(); // so the app has the panel before the editor opens it
+                                    _host.EditPanel(id);
+                                }) { Accent = true }, new PillButton("Import…", ImportPanel) { AccessibleName = "Import a panel layout from a file" }), ""));
+        p.Controls.Add(Hint("Or start from a ready-made layout (replaces this panel's tiles). Readings for devices this PC doesn't have are left out."));
         var gallery = new FlowLayoutPanel { AutoSize = true, WrapContents = true, BackColor = Theme.Bg, Margin = new Padding(0, 4, 0, 4), MaximumSize = new Size(Ui.S(p, 680), 0) };
         var cards = new List<(PresetCard Card, string Id)>();
         foreach (var (id, name, description) in PanelPresets.All)

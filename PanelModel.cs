@@ -16,9 +16,12 @@ public enum PanelTileKind
 {
     /// <summary>A reading: a headline alias (<see cref="PanelTile.Source"/>) or any sensor (<see cref="PanelTile.Sensor"/>).</summary>
     Value,
+    /// <summary>Text, with readings filled in for placeholders such as <c>{cputemp}</c> (see <see cref="PanelText"/>).</summary>
     Text,
     Clock,
     Divider,
+    /// <summary>A picture (<see cref="PanelTile.Image"/>).</summary>
+    Image,
 }
 
 /// <summary>What a value tile draws; any combination.</summary>
@@ -37,6 +40,35 @@ public enum PanelBarDirection
 {
     Horizontal,
     Vertical,
+}
+
+public enum PanelGaugeStyle
+{
+    /// <summary>Three-quarter ring open at the bottom.</summary>
+    Ring,
+    Semicircle,
+    Circle,
+    /// <summary>A three-quarter ring of separate segments.</summary>
+    Segmented,
+}
+
+public enum PanelBarStyle
+{
+    Solid,
+    /// <summary>Separate blocks, like an LED meter.</summary>
+    Segmented,
+}
+
+/// <summary>How a background picture covers its area.</summary>
+public enum PanelImageFit
+{
+    /// <summary>Covers the area, cropping what doesn't fit.</summary>
+    Fill,
+    /// <summary>Shows all of it, leaving bands.</summary>
+    Fit,
+    Stretch,
+    Tile,
+    Center,
 }
 
 /// <summary>From <see cref="Value"/> upwards (in the reading's own unit, °C for temperatures) the tile turns <see cref="Color"/>.</summary>
@@ -58,6 +90,9 @@ public sealed class PanelStyle
     public bool TileBackgrounds { get; set; } = true;
     public int CornerRadius { get; set; } = 10;
     public string FontFamily { get; set; } = "Segoe UI";
+    /// <summary>A picture behind the tiles: file name in the panels folder (<see cref="PanelImages"/>).</summary>
+    public string? BackgroundImage { get; set; }
+    public PanelImageFit BackgroundFit { get; set; }
     public string? LabelColor { get; set; }
     public string? ValueColor { get; set; }
     /// <summary>Bars, rings and graphs; null for each device's own colour (CPU blue, GPU green…).</summary>
@@ -79,8 +114,21 @@ public sealed class PanelTile
     /// <summary>Any sensor instead of a headline reading.</summary>
     public SensorKey? Sensor { get; set; }
 
+    /// <summary>Free placement (<see cref="PanelLayout.FreePlacement"/>): position and size at 100 % and 96 DPI.</summary>
+    public int X { get; set; }
+    public int Y { get; set; }
+    public int Width { get; set; } = 120;
+    public int Height { get; set; } = 64;
+
     public PanelVisual Visuals { get; set; } = PanelVisual.Label | PanelVisual.Number;
     public PanelBarDirection BarDirection { get; set; }
+    public PanelBarStyle BarStyle { get; set; }
+    public PanelGaugeStyle GaugeStyle { get; set; }
+    /// <summary>Null for the panel's font.</summary>
+    public string? FontFamily { get; set; }
+    /// <summary>Image tiles: file name in the panels folder (<see cref="PanelImages"/>).</summary>
+    public string? Image { get; set; }
+    public PanelImageFit ImageFit { get; set; } = PanelImageFit.Fit;
     public int GraphSeconds { get; set; } = 60;
     /// <summary>Decimal places; null for the reading's usual format.</summary>
     public int? Decimals { get; set; }
@@ -111,6 +159,8 @@ public sealed class PanelTile
 /// <summary>A floating panel of tiles on a grid.</summary>
 public sealed class PanelLayout
 {
+    /// <summary>Tells panels apart (menus, the editor); stays the same when the panel is renamed.</summary>
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Name { get; set; } = "Panel";
     /// <summary>The preset it was made from, for the gallery's selection.</summary>
     public string? Preset { get; set; }
@@ -139,6 +189,12 @@ public sealed class PanelLayout
     public int Gap { get; set; } = 6;
     public int Padding { get; set; } = 8;
 
+    /// <summary>Tiles are placed anywhere by <see cref="PanelTile.X"/>/<see cref="PanelTile.Y"/> (later tiles on top) instead of on the grid.</summary>
+    public bool FreePlacement { get; set; }
+    /// <summary>Free placement: the panel's size at 100 % and 96 DPI.</summary>
+    public int Width { get; set; } = 400;
+    public int Height { get; set; } = 240;
+
     public PanelStyle Style { get; set; } = new();
     public List<PanelTile> Tiles { get; set; } = new();
 
@@ -161,18 +217,29 @@ public sealed class PanelLayout
         CellHeight = preset.CellHeight;
         Gap = preset.Gap;
         Padding = preset.Padding;
+        FreePlacement = preset.FreePlacement;
+        Width = preset.Width;
+        Height = preset.Height;
         Style = preset.Style.Clone();
         Tiles = preset.Tiles.Select(t => t.Clone()).ToList();
     }
 }
 
-/// <summary>Grid maths: where cells are, and whether tiles fit. Pure, so it is unit-tested.</summary>
+/// <summary>
+/// Layout maths: where tiles are in pixels, whether they fit, and the moves the editor makes. Pure, so it is
+/// unit-tested. Grid panels place tiles in cells; free-placement panels by position and size.
+/// </summary>
 static class PanelGrid
 {
+    /// <summary>The smallest tile in free placement, at 100 %.</summary>
+    public const int MinFreeSize = 16;
+    public const int MaxColumns = 12, MaxRows = 24;
+
     /// <summary>The panel's size in pixels at <paramref name="scale"/>.</summary>
-    public static Size PanelSize(PanelLayout l, float scale) => new(
-        Px(l.Padding * 2 + l.Columns * l.CellWidth + Math.Max(0, l.Columns - 1) * l.Gap, scale),
-        Px(l.Padding * 2 + l.Rows * l.CellHeight + Math.Max(0, l.Rows - 1) * l.Gap, scale));
+    public static Size PanelSize(PanelLayout l, float scale) => l.FreePlacement
+        ? new(Px(Math.Max(MinFreeSize, l.Width), scale), Px(Math.Max(MinFreeSize, l.Height), scale))
+        : new(Px(l.Padding * 2 + l.Columns * l.CellWidth + Math.Max(0, l.Columns - 1) * l.Gap, scale),
+              Px(l.Padding * 2 + l.Rows * l.CellHeight + Math.Max(0, l.Rows - 1) * l.Gap, scale));
 
     /// <summary>
     /// A block of cells in pixels. Edges are rounded from unscaled positions (not added up from rounded
@@ -187,12 +254,28 @@ static class PanelGrid
         return Rectangle.FromLTRB(x0, y0, x1, y1);
     }
 
+    /// <summary>Where a tile is drawn, in pixels from the panel's top-left corner.</summary>
+    public static Rectangle TileRect(PanelLayout l, PanelTile t, float scale) => l.FreePlacement
+        ? Rectangle.FromLTRB(Px(t.X, scale), Px(t.Y, scale), Px(t.X + Math.Max(MinFreeSize, t.Width), scale), Px(t.Y + Math.Max(MinFreeSize, t.Height), scale))
+        : CellRect(l, t.Cells, scale);
+
     static int Px(float v, float scale) => (int)Math.Round(v * scale);
 
     /// <summary>Problems with a layout ("tile 3 is outside the grid"), or none.</summary>
     public static List<string> Problems(PanelLayout l)
     {
         var problems = new List<string>();
+        if (l.FreePlacement)
+        {
+            var bounds = new Rectangle(0, 0, l.Width, l.Height);
+            for (int i = 0; i < l.Tiles.Count; i++)
+            {
+                var t = l.Tiles[i];
+                if (t.Width < MinFreeSize || t.Height < MinFreeSize) problems.Add($"tile {i} ({Describe(t)}) is smaller than {MinFreeSize} px");
+                if (!bounds.Contains(new Rectangle(t.X, t.Y, t.Width, t.Height))) problems.Add($"tile {i} ({Describe(t)}) is outside the {l.Width}×{l.Height} panel");
+            }
+            return problems;
+        }
         var grid = new Rectangle(0, 0, l.Columns, l.Rows);
         for (int i = 0; i < l.Tiles.Count; i++)
         {
@@ -217,24 +300,157 @@ static class PanelGrid
         {
             t.ColumnSpan = Math.Clamp(t.ColumnSpan, 1, l.Columns);
             t.RowSpan = Math.Max(1, t.RowSpan);
-            for (int row = 0, placed = 0; placed == 0; row++)
-                for (int col = 0; col + t.ColumnSpan <= l.Columns; col++)
-                {
-                    var spot = new Rectangle(col, row, t.ColumnSpan, t.RowSpan);
-                    if (taken.Any(r => r.IntersectsWith(spot))) continue;
-                    t.Column = col;
-                    t.Row = row;
-                    taken.Add(spot);
-                    placed = 1;
-                    break;
-                }
+            var spot = FirstFree(l.Columns, taken, t.ColumnSpan, t.RowSpan);
+            (t.Column, t.Row) = (spot.X, spot.Y);
+            taken.Add(new Rectangle(spot.X, spot.Y, t.ColumnSpan, t.RowSpan));
         }
         l.Rows = Math.Max(1, taken.Select(r => r.Bottom).DefaultIfEmpty(1).Max());
     }
 
-    /// <summary>The tile at a point on the panel, or -1.</summary>
-    public static int HitTest(PanelLayout l, Point p, float scale) =>
-        l.Tiles.FindIndex(t => CellRect(l, t.Cells, scale).Contains(p));
+    /// <summary>The first spot, reading order, where a block of cells fits among <paramref name="taken"/> (rows grow downwards without limit).</summary>
+    static Point FirstFree(int columns, IReadOnlyList<Rectangle> taken, int colSpan, int rowSpan)
+    {
+        colSpan = Math.Clamp(colSpan, 1, columns);
+        for (int row = 0; ; row++)
+            for (int col = 0; col + colSpan <= columns; col++)
+            {
+                var spot = new Rectangle(col, row, colSpan, rowSpan);
+                if (!taken.Any(r => r.IntersectsWith(spot))) return spot.Location;
+            }
+    }
+
+    /// <summary>The tile at a point on the panel (the topmost, when tiles overlap), or -1.</summary>
+    public static int HitTest(PanelLayout l, Point p, float scale)
+    {
+        for (int i = l.Tiles.Count - 1; i >= 0; i--)
+            if (TileRect(l, l.Tiles[i], scale).Contains(p)) return i;
+        return -1;
+    }
+
+    /// <summary>Grid panels: the cell under a point (clamped to the grid).</summary>
+    public static Point CellAt(PanelLayout l, Point p, float scale)
+    {
+        float x = p.X / scale - l.Padding, y = p.Y / scale - l.Padding;
+        int col = (int)Math.Floor(x / (l.CellWidth + l.Gap)), row = (int)Math.Floor(y / (l.CellHeight + l.Gap));
+        return new Point(Math.Clamp(col, 0, l.Columns - 1), Math.Clamp(row, 0, l.Rows - 1));
+    }
+
+    /// <summary>Grid panels: whether tile <paramref name="index"/> (or a new tile, with -1) can take <paramref name="cells"/>.</summary>
+    public static bool Fits(PanelLayout l, int index, Rectangle cells)
+    {
+        if (cells.Left < 0 || cells.Top < 0 || cells.Width < 1 || cells.Height < 1 || !new Rectangle(0, 0, l.Columns, l.Rows).Contains(cells)) return false;
+        for (int i = 0; i < l.Tiles.Count; i++)
+            if (i != index && l.Tiles[i].Cells.IntersectsWith(cells)) return false;
+        return true;
+    }
+
+    /// <summary>Grid panels: moves and/or resizes a tile when the cells are free; false (and no change) otherwise.</summary>
+    public static bool Place(PanelLayout l, int index, Rectangle cells)
+    {
+        if (!Fits(l, index, cells)) return false;
+        var t = l.Tiles[index];
+        (t.Column, t.Row, t.ColumnSpan, t.RowSpan) = (cells.X, cells.Y, cells.Width, cells.Height);
+        return true;
+    }
+
+    /// <summary>
+    /// Adds a tile in the first free spot (grid) or below the others (free placement), growing the panel when it
+    /// is full. Returns its index.
+    /// </summary>
+    public static int Add(PanelLayout l, PanelTile tile)
+    {
+        if (l.FreePlacement)
+        {
+            int bottom = l.Tiles.Select(t => t.Y + t.Height).DefaultIfEmpty(0).Max();
+            tile.X = Math.Clamp(tile.X, 0, Math.Max(0, l.Width - tile.Width));
+            tile.Y = l.Tiles.Count == 0 ? 8 : bottom + 8;
+            l.Height = Math.Max(l.Height, tile.Y + tile.Height + 8);
+            l.Width = Math.Max(l.Width, tile.X + tile.Width);
+        }
+        else
+        {
+            tile.ColumnSpan = Math.Clamp(tile.ColumnSpan, 1, l.Columns);
+            tile.RowSpan = Math.Max(1, tile.RowSpan);
+            var spot = FirstFree(l.Columns, l.Tiles.Select(t => t.Cells).ToList(), tile.ColumnSpan, tile.RowSpan);
+            (tile.Column, tile.Row) = (spot.X, spot.Y);
+            l.Rows = Math.Min(MaxRows, Math.Max(l.Rows, spot.Y + tile.RowSpan));
+        }
+        l.Tiles.Add(tile);
+        return l.Tiles.Count - 1;
+    }
+
+    /// <summary>Grid panels: changes the grid size. Shrinking is refused (false) while a tile would end up outside.</summary>
+    public static bool Resize(PanelLayout l, int columns, int rows)
+    {
+        columns = Math.Clamp(columns, 1, MaxColumns);
+        rows = Math.Clamp(rows, 1, MaxRows);
+        if (l.Tiles.Any(t => t.Column + t.ColumnSpan > columns || t.Row + t.RowSpan > rows)) return false;
+        (l.Columns, l.Rows) = (columns, rows);
+        return true;
+    }
+
+    /// <summary>Switches between grid and free placement, keeping every tile where it is on screen (at 100 %).</summary>
+    public static void SetFreePlacement(PanelLayout l, bool free)
+    {
+        if (free == l.FreePlacement) return;
+        if (free)
+        {
+            var size = PanelSize(l, 1);
+            foreach (var t in l.Tiles)
+            {
+                var r = CellRect(l, t.Cells, 1);
+                (t.X, t.Y, t.Width, t.Height) = (r.X, r.Y, r.Width, r.Height);
+            }
+            (l.Width, l.Height) = (size.Width, size.Height);
+            l.FreePlacement = true;
+            return;
+        }
+        // Back to the grid: each tile takes the cells nearest where it is. If that makes tiles overlap, they are
+        // packed in top-to-bottom, left-to-right order instead.
+        l.FreePlacement = false;
+        int pitchX = l.CellWidth + l.Gap, pitchY = l.CellHeight + l.Gap;
+        l.Columns = Math.Clamp((int)Math.Round((l.Width - l.Padding * 2 + l.Gap) / (float)pitchX), 1, MaxColumns);
+        foreach (var t in l.Tiles)
+        {
+            t.ColumnSpan = Math.Clamp((int)Math.Round((t.Width + l.Gap) / (float)pitchX), 1, l.Columns);
+            t.RowSpan = Math.Clamp((int)Math.Round((t.Height + l.Gap) / (float)pitchY), 1, MaxRows);
+            t.Column = Math.Clamp((int)Math.Round((t.X - l.Padding) / (float)pitchX), 0, l.Columns - t.ColumnSpan);
+            t.Row = Math.Clamp((int)Math.Round((t.Y - l.Padding) / (float)pitchY), 0, MaxRows - t.RowSpan);
+        }
+        l.Rows = Math.Clamp(l.Tiles.Select(t => t.Row + t.RowSpan).DefaultIfEmpty(1).Max(), 1, MaxRows);
+        if (Problems(l).Count == 0) return;
+        l.Tiles = l.Tiles.OrderBy(t => t.Y).ThenBy(t => t.X).ToList();
+        Pack(l);
+    }
+
+    /// <summary>
+    /// Free placement: snaps a moving edge to the nearest guide within <paramref name="threshold"/>. Returns the
+    /// snapped value and the guide it snapped to (or null).
+    /// </summary>
+    public static (int Value, int? Guide) Snap(int value, IEnumerable<int> guides, int threshold)
+    {
+        int? best = null;
+        foreach (var g in guides)
+            if (Math.Abs(g - value) <= threshold && (best == null || Math.Abs(g - value) < Math.Abs(best.Value - value))) best = g;
+        return (best ?? value, best);
+    }
+
+    /// <summary>Free placement: the lines a tile's edges can snap to (panel edges and centre, other tiles' edges).</summary>
+    public static (List<int> X, List<int> Y) Guides(PanelLayout l, int except)
+    {
+        var xs = new List<int> { 0, l.Width, l.Width / 2 };
+        var ys = new List<int> { 0, l.Height, l.Height / 2 };
+        for (int i = 0; i < l.Tiles.Count; i++)
+        {
+            if (i == except) continue;
+            var t = l.Tiles[i];
+            xs.Add(t.X);
+            xs.Add(t.X + t.Width);
+            ys.Add(t.Y);
+            ys.Add(t.Y + t.Height);
+        }
+        return (xs, ys);
+    }
 }
 
 /// <summary>"#RRGGBB" colours in settings.</summary>

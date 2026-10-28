@@ -770,6 +770,57 @@ static class Program
             }
             bmp.Save(Path.Combine(dir, file), ImageFormat.Png);
         }
+        // A free-placement panel with the other gauge and bar styles and live text, as a case screen might use.
+        Theme.Apply(ThemeMode.Dark);
+        var showcase = new PanelLayout
+        {
+            FreePlacement = true, Width = 520, Height = 300, Style = { FontFamily = "Bahnschrift", CornerRadius = 14 },
+            Tiles =
+            {
+                new() { Kind = PanelTileKind.Clock, Text = "HH:mm", X = 12, Y = 12, Width = 200, Height = 70, FontSize = 130 },
+                new() { Kind = PanelTileKind.Text, Text = "CPU {cputemp}  ·  GPU {gputemp}", X = 220, Y = 12, Width = 288, Height = 70 },
+                new() { Source = "cpu", Visuals = PanelVisual.Label | PanelVisual.Number | PanelVisual.Ring, GaugeStyle = PanelGaugeStyle.Semicircle, X = 12, Y = 92, Width = 160, Height = 110 },
+                new() { Source = "gpu", Visuals = PanelVisual.Label | PanelVisual.Number | PanelVisual.Ring, GaugeStyle = PanelGaugeStyle.Segmented, X = 180, Y = 92, Width = 110, Height = 110 },
+                new() { Source = "ram", Visuals = PanelVisual.Label | PanelVisual.Number | PanelVisual.Ring, GaugeStyle = PanelGaugeStyle.Circle, X = 298, Y = 92, Width = 110, Height = 110 },
+                new() { Source = "gputemp", Visuals = PanelVisual.Number | PanelVisual.Bar, BarDirection = PanelBarDirection.Vertical, BarStyle = PanelBarStyle.Segmented, X = 416, Y = 92, Width = 92, Height = 196 },
+                new() { Source = "cpupower", Visuals = PanelVisual.Label | PanelVisual.Number | PanelVisual.Bar, BarStyle = PanelBarStyle.Segmented, X = 12, Y = 210, Width = 194, Height = 78 },
+                new() { Source = "netdown", Visuals = PanelVisual.Label | PanelVisual.Number | PanelVisual.Graph, X = 214, Y = 210, Width = 194, Height = 78 },
+            },
+        };
+        foreach (var t in showcase.Tiles.Where(t => t.Source != null)) t.Kind = PanelTileKind.Value;
+        using (var free = PanelRenderer.Render(showcase, snap, scale, settings, hw.GetHistory))
+        using (var bmp = new Bitmap(free.Width + 48, free.Height + 48))
+        {
+            using (var g = Graphics.FromImage(bmp))
+            {
+                PanelBackdrop.Paint(g, new Rectangle(0, 0, bmp.Width, bmp.Height), 0);
+                g.DrawImageUnscaled(free, 24, 24);
+            }
+            bmp.Save(Path.Combine(dir, "panel-free.png"), ImageFormat.Png);
+        }
+
+        // The layout editor on the showcase, with a gauge selected.
+        foreach (var (file, layout) in new[] { ("panel-editor.png", showcase), ("panel-editor-grid.png", PanelPresets.Build("full", snap)) })
+        {
+            using var editor = new PanelEditorForm(settings, layout, () => snap, hw.GetHistory, _ => { })
+            {
+                StartPosition = FormStartPosition.Manual, Location = new Point(40, 40), ShowInTaskbar = false, Opacity = 0.01,
+            };
+            editor.Show();
+            editor.Select(file == "panel-editor.png" ? 2 : 4);
+            Application.DoEvents();
+            using var bmp = new Bitmap(editor.ClientSize.Width, editor.ClientSize.Height);
+            using (var full = new Bitmap(editor.Width, editor.Height))
+            {
+                editor.DrawToBitmap(full, new Rectangle(0, 0, editor.Width, editor.Height));
+                var origin = editor.PointToScreen(Point.Empty);
+                using var g = Graphics.FromImage(bmp);
+                g.DrawImage(full, new Rectangle(Point.Empty, bmp.Size), new Rectangle(origin.X - editor.Left, origin.Y - editor.Top, bmp.Width, bmp.Height), GraphicsUnit.Pixel);
+            }
+            bmp.Save(Path.Combine(dir, file), ImageFormat.Png);
+            editor.Close();
+        }
+
         // The panel page in Settings shows the Gauges preset, switched on.
         PanelPresets.EnsurePanel(settings, snap).ApplyPreset(PanelPresets.Build("gauges", snap));
         settings.Panels[0].Enabled = true;
@@ -892,5 +943,6 @@ static class Program
         public DateTime? LastFired(string ruleId) => null;
         public void TestAlert(AlertRule rule) { }
         public void ReopenSettings(string page) { }
+        public void EditPanel(string id) { }
     }
 }

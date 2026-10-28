@@ -20,6 +20,7 @@ sealed class DashboardForm : Form
     public event Action? SensorsChanged;
     public event Action<string>? ResetMinMaxRequested;
     public event Action<SensorKey>? AddAlertRequested;
+    public event Action<SensorKey>? AddToPanelRequested;
 
     public DashboardForm(AppSettings settings, bool isAdmin)
     {
@@ -39,6 +40,7 @@ sealed class DashboardForm : Form
         _view.SensorsChanged += () => SensorsChanged?.Invoke();
         _view.ResetMinMaxRequested += id => ResetMinMaxRequested?.Invoke(id);
         _view.AddAlertRequested += key => AddAlertRequested?.Invoke(key);
+        _view.AddToPanelRequested += key => AddToPanelRequested?.Invoke(key);
         Controls.Add(_view);
     }
 

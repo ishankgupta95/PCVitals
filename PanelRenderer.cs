@@ -14,7 +14,8 @@ sealed class PanelRenderer : IDisposable
 {
     readonly PanelLayout _layout;
     readonly AppSettings? _settings;
-    readonly float[] _seenMax;
+    // By tile, not index: the editor adds and removes tiles while the renderer lives.
+    readonly Dictionary<PanelTile, float> _seenMax = new(ReferenceEqualityComparer.Instance);
     Bitmap? _static;
     string? _staticKey;
 
@@ -26,10 +27,12 @@ sealed class PanelRenderer : IDisposable
     {
         _layout = layout;
         _settings = settings;
-        _seenMax = new float[layout.Tiles.Count];
     }
 
     public PanelLayout Layout => _layout;
+
+    /// <summary>The layout was edited in place: redraw the cached backgrounds and labels next time.</summary>
+    public void Invalidate() => _staticKey = null;
 
     /// <summary>What one tile shows for one reading.</summary>
     internal sealed class TileState
@@ -67,10 +70,16 @@ sealed class PanelRenderer : IDisposable
                     st.Number = FormatClock(tile.Text, now);
                     sig.Append('|').Append(st.Number);
                     continue;
+                case PanelTileKind.Text when PanelText.IsLive(tile.Text):
+                    // Text with readings in it changes like a value, so it is drawn with the values.
+                    st.Number = PanelText.Expand(tile.Text!, snap, _settings);
+                    sig.Append('|').Append(st.Number);
+                    continue;
                 case PanelTileKind.Text:
                     st.Label = tile.Text ?? "";
                     continue;
-                case PanelTileKind.Divider:
+                case PanelTileKind.Divider or PanelTileKind.Image:
+                    st.Label = tile.Image ?? "";
                     continue;
             }
 
@@ -89,8 +98,8 @@ sealed class PanelRenderer : IDisposable
             st.Number = number;
             st.Unit = tile.ShowUnit ? unit : "";
 
-            if (r.Value is { } v && !float.IsNaN(v)) _seenMax[i] = Math.Max(_seenMax[i], v);
-            float max = tile.Max ?? r.Max ?? AutoMax(r.Unit, _seenMax[i]);
+            if (r.Value is { } v && !float.IsNaN(v)) _seenMax[tile] = Math.Max(_seenMax.GetValueOrDefault(tile), v);
+            float max = tile.Max ?? r.Max ?? AutoMax(r.Unit, _seenMax.GetValueOrDefault(tile));
             if (r.Value is { } value && max > 0) st.Fraction = Math.Clamp(value / max, 0, 1);
 
             var thresholds = tile.Thresholds ?? (r.Unit == PanelUnit.Temp ? PanelColor.TemperatureDefaults() : null);
@@ -189,10 +198,12 @@ sealed class PanelRenderer : IDisposable
 
     Rectangle TileRect(int i, float scale, Point origin)
     {
-        var r = PanelGrid.CellRect(_layout, _layout.Tiles[i].Cells, scale);
+        var r = PanelGrid.TileRect(_layout, _layout.Tiles[i], scale);
         r.Offset(origin);
         return r;
     }
+
+    string FamilyOf(PanelTile t) => string.IsNullOrWhiteSpace(t.FontFamily) ? _layout.Style.FontFamily : t.FontFamily!;
 
     void DrawStatic(Graphics g, Frame frame, Size canvas, float scale, Point origin, bool fill)
     {
@@ -213,6 +224,17 @@ sealed class PanelRenderer : IDisposable
                 Gfx.FillRounded(g, new Rectangle(origin.X, origin.Y, size.Width - 1, size.Height - 1), radius, bg);
             }
         }
+        if (PanelImages.Get(style.BackgroundImage) is { } picture)
+        {
+            var size = PanelGrid.PanelSize(_layout, scale);
+            var area = fill ? new Rectangle(Point.Empty, canvas) : new Rectangle(origin, size);
+            var state = g.Save();
+            if (!fill)
+                using (var clip = Gfx.RoundedPath(area, radius))
+                    g.SetClip(clip);
+            PanelImages.Draw(g, picture, area, style.BackgroundFit);
+            g.Restore(state);
+        }
 
         var labelColor = PanelColor.Parse(style.LabelColor) ?? Theme.TextDim;
         var tileBg = PanelColor.Parse(style.TileBackground) ?? Theme.Surface;
@@ -223,7 +245,7 @@ sealed class PanelRenderer : IDisposable
             var tile = _layout.Tiles[i];
             var st = frame.Tiles[i];
             var r = TileRect(i, scale, origin);
-            if (style.TileBackgrounds && tileAlpha > 0 && tile.Kind != PanelTileKind.Divider)
+            if (style.TileBackgrounds && tileAlpha > 0 && tile.Kind is not (PanelTileKind.Divider or PanelTileKind.Image))
                 Gfx.FillRounded(g, r, Math.Max(2, radius * 2 / 3), Theme.WithAlpha(tileBg, tileAlpha));
 
             switch (tile.Kind)
@@ -235,23 +257,86 @@ sealed class PanelRenderer : IDisposable
                     else g.DrawLine(pen, r.Left + r.Width / 2f, r.Top + 4 * scale, r.Left + r.Width / 2f, r.Bottom - 4 * scale);
                     continue;
                 }
-                case PanelTileKind.Text:
+                case PanelTileKind.Image:
+                    if (PanelImages.Get(tile.Image) is { } img)
+                    {
+                        var state = g.Save();
+                        using (var clip = Gfx.RoundedPath(r, Math.Max(2, radius * 2 / 3)))
+                            g.SetClip(clip);
+                        PanelImages.Draw(g, img, r, tile.ImageFit);
+                        g.Restore(state);
+                    }
+                    continue;
+                case PanelTileKind.Text when !PanelText.IsLive(tile.Text):
                     DrawCentered(g, st.Label, r, scale, tile, PanelColor.Parse(tile.ValueColor) ?? Theme.Text, 0.42f);
                     continue;
-                case PanelTileKind.Clock:
+                case PanelTileKind.Text or PanelTileKind.Clock:
                     continue;
             }
 
             var m = Measure(tile, r, scale, st.Label);
             if (m.Label is { } lr)
-                DrawText(g, st.Label.ToUpperInvariant(), Font(style.FontFamily, m.LabelPx, FontStyle.Bold), labelColor, lr,
+                DrawText(g, st.Label.ToUpperInvariant(), Font(FamilyOf(tile), m.LabelPx, FontStyle.Bold), labelColor, lr,
                          (tile.Visuals & PanelVisual.Ring) != 0 ? StringAlignment.Center : StringAlignment.Near);
             if (m.Bar is { } bar)
-                Gfx.FillRounded(g, bar, Math.Min(bar.Width, bar.Height) / 2, Theme.Track);
+                DrawBar(g, tile, bar, 1, Theme.Track, scale);
             if (m.Ring is { } ring)
-                using (var pen = new Pen(Theme.Track, m.RingWidth) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-                    g.DrawArc(pen, ring, 135, 270);
+                DrawGauge(g, tile.GaugeStyle, ring, m.RingWidth, 1, Theme.Track);
         }
+    }
+
+    /// <summary>Where a gauge starts and how far it goes, in degrees clockwise from 3 o'clock.</summary>
+    static (float Start, float Sweep) Arc(PanelGaugeStyle style) => style switch
+    {
+        PanelGaugeStyle.Semicircle => (180, 180),
+        PanelGaugeStyle.Circle => (-90, 360),
+        _ => (135, 270),
+    };
+
+    /// <summary>A gauge's track (<paramref name="fraction"/> 1) or its filled part.</summary>
+    static void DrawGauge(Graphics g, PanelGaugeStyle style, Rectangle ring, float width, float fraction, Color color)
+    {
+        var (start, sweep) = Arc(style);
+        if (style == PanelGaugeStyle.Segmented)
+        {
+            const int segments = 18;
+            float step = sweep / segments, gapDeg = step * 0.28f;
+            int lit = (int)Math.Round(fraction * segments);
+            using var pen = new Pen(color, width);
+            for (int k = 0; k < lit; k++) g.DrawArc(pen, ring, start + k * step + gapDeg / 2, step - gapDeg);
+            return;
+        }
+        using var round = new Pen(color, width) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        g.DrawArc(round, ring, start, sweep * fraction);
+    }
+
+    /// <summary>A bar's track (<paramref name="fraction"/> 1) or its filled part.</summary>
+    static void DrawBar(Graphics g, PanelTile tile, Rectangle bar, float fraction, Color color, float scale)
+    {
+        bool vertical = tile.BarDirection == PanelBarDirection.Vertical;
+        if (tile.BarStyle == PanelBarStyle.Segmented)
+        {
+            int length = vertical ? bar.Height : bar.Width;
+            int thickness = vertical ? bar.Width : bar.Height;
+            int gap = Math.Max(1, (int)Math.Round(2 * scale));
+            int count = Math.Clamp(length / Math.Max(4, thickness + gap), 4, 40);
+            float pitch = (length + gap) / (float)count;
+            int lit = (int)Math.Round(fraction * count);
+            using var brush = new SolidBrush(color);
+            for (int k = 0; k < lit; k++)
+            {
+                float a = k * pitch, b = a + pitch - gap;
+                var block = vertical
+                    ? RectangleF.FromLTRB(bar.Left, bar.Bottom - b, bar.Right, bar.Bottom - a)
+                    : RectangleF.FromLTRB(bar.Left + a, bar.Top, bar.Left + b, bar.Bottom);
+                g.FillRectangle(brush, block);
+            }
+            return;
+        }
+        var fillRect = vertical
+            ? Rectangle.FromLTRB(bar.Left, bar.Bottom - Math.Max(bar.Width, (int)(bar.Height * fraction)), bar.Right, bar.Bottom)
+            : bar with { Width = Math.Max(bar.Height, (int)(bar.Width * fraction)) };
+        Gfx.FillRounded(g, fillRect, Math.Min(bar.Width, bar.Height) / 2, color);
     }
 
     void DrawDynamic(Graphics g, Frame frame, float scale, Point origin)
@@ -267,23 +352,22 @@ sealed class PanelRenderer : IDisposable
                 DrawCentered(g, st.Number, r, scale, tile, st.ValueColor, 0.5f);
                 continue;
             }
+            if (tile.Kind == PanelTileKind.Text)
+            {
+                if (PanelText.IsLive(tile.Text)) DrawCentered(g, st.Number, r, scale, tile, st.ValueColor, 0.42f);
+                continue;
+            }
             if (tile.Kind != PanelTileKind.Value) continue;
 
             var m = Measure(tile, r, scale, st.Label);
             if (m.Graph is { } gr && st.Graph is { Length: > 1 } values)
                 Gfx.Sparkline(g, gr, values, st.GraphMax, st.Accent, Math.Max(1.2f, 1.5f * scale), slots: GraphSlots(tile));
             if (m.Bar is { } bar && st.Fraction is { } f && f > 0)
-            {
-                var fillRect = tile.BarDirection == PanelBarDirection.Vertical
-                    ? Rectangle.FromLTRB(bar.Left, bar.Bottom - Math.Max(bar.Width, (int)(bar.Height * f)), bar.Right, bar.Bottom)
-                    : bar with { Width = Math.Max(bar.Height, (int)(bar.Width * f)) };
-                Gfx.FillRounded(g, fillRect, Math.Min(bar.Width, bar.Height) / 2, st.Accent);
-            }
+                DrawBar(g, tile, bar, f, st.Accent, scale);
             if (m.Ring is { } ring && st.Fraction is { } rf && rf > 0.002f)
-                using (var pen = new Pen(st.Accent, m.RingWidth) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-                    g.DrawArc(pen, ring, 135, 270 * rf);
+                DrawGauge(g, tile.GaugeStyle, ring, m.RingWidth, rf, st.Accent);
             if (m.Number is { } nr)
-                DrawValue(g, st.Number, st.Unit, style.FontFamily, m.NumberPx, st.ValueColor, nr, m.NumberAlign);
+                DrawValue(g, st.Number, st.Unit, FamilyOf(tile), m.NumberPx, st.ValueColor, nr, m.NumberAlign);
         }
     }
 
@@ -305,9 +389,25 @@ sealed class PanelRenderer : IDisposable
         if ((v & PanelVisual.Ring) != 0)
         {
             int gap = hasLabel ? (int)(4 * s) : 0;
-            int d = Math.Max(8, Math.Min(inner.Width, inner.Height - labelH - gap));
+            int room = inner.Height - labelH - gap;
+            if (tile.GaugeStyle == PanelGaugeStyle.Semicircle)
+            {
+                // Only the top half of the circle is drawn, so it can be twice as wide as the room is tall.
+                int sd = Math.Max(8, Math.Min(inner.Width, room * 2));
+                float sw = Math.Max(3 * s, sd * 0.09f);
+                int stop = inner.Top + (room - sd / 2) / 2;
+                var semi = new RectangleF(inner.Left + (inner.Width - sd) / 2f, stop, sd, sd);
+                var semiBox = Rectangle.Round(RectangleF.Inflate(semi, -sw / 2, -sw / 2));
+                // The number sits in the bowl, on the gauge's baseline.
+                var semiNumber = Rectangle.Round(new RectangleF(semi.Left + sw * 1.6f, semi.Top + sd * 0.22f, sd - sw * 3.2f, sd * 0.28f));
+                return new TileMetrics(
+                    hasLabel ? new Rectangle(inner.Left, stop + sd / 2 + gap, inner.Width, labelH) : null, labelPx,
+                    number ? semiNumber : null, sd * 0.2f * fs, StringAlignment.Center,
+                    null, semiBox, sw, null);
+            }
+            int d = Math.Max(8, Math.Min(inner.Width, room));
             float width = Math.Max(3 * s, d * 0.1f);
-            int top = inner.Top + (inner.Height - labelH - gap - d) / 2;
+            int top = inner.Top + (room - d) / 2;
             var ring = new RectangleF(inner.Left + (inner.Width - d) / 2f, top, d, d);
             var ringBox = Rectangle.Round(RectangleF.Inflate(ring, -width / 2, -width / 2));
             var numberBox = Rectangle.Round(RectangleF.Inflate(ring, -width * 1.6f, -width * 1.6f));
@@ -455,7 +555,7 @@ sealed class PanelRenderer : IDisposable
         float fs = Math.Clamp(tile.FontSize, 50, 250) / 100f;
         float px = Math.Min(r.Height * sizeOfHeight * fs, 120 * scale);
         var inner = Rectangle.Inflate(r, -(int)(8 * scale), 0);
-        DrawValue(g, text, "", _layout.Style.FontFamily, px, color, inner, StringAlignment.Center);
+        DrawValue(g, text, "", FamilyOf(tile), px, color, inner, StringAlignment.Center);
     }
 
     // ---- Whole-panel helpers ------------------------------------------------------------------

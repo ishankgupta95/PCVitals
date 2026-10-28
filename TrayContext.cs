@@ -40,7 +40,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     AlertRule[] _alertRules = Array.Empty<AlertRule>();
     NotifyIcon? _logo;
     IntPtr _logoHandle;
-    ToolStripMenuItem _autostartItem = null!, _widgetItem = null!, _panelItem = null!, _panelLockItem = null!;
+    ToolStripMenuItem _autostartItem = null!, _widgetItem = null!, _panelItem = null!;
     SettingsForm? _settingsForm;
     bool _taskbarLight = Theme.TaskbarIsLight();
     bool _exiting;
@@ -67,6 +67,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         };
         _dash.ResetMinMaxRequested += _hw.ResetMinMax;
         _dash.AddAlertRequested += AddAlertFor;
+        _dash.AddToPanelRequested += AddSensorToPanel;
         // Poll everything only while the dashboard is on screen; minimised or closed, go back to the lean polling.
         void DashboardShownChanged()
         {
@@ -113,6 +114,8 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         };
         _placementTimer.Start();
         SyncPanels();
+        // Pictures from panels that were since deleted or changed.
+        PanelImages.Prune(_settings.Panels);
 
         Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         ListenForExitSignal();
@@ -320,8 +323,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         {
             if (i == _panels.Count)
             {
-                // Created only once a panel is switched on: no window, no cost before that.
-                if (!_settings.Panels[i].Enabled) break;
+                // Its window handle is only made when it is first shown, so a hidden panel costs nothing.
                 var panel = new DesktopPanel(_settings, _settings.Panels[i], _hw.GetHistory);
                 panel.TileClicked += page => ShowDashboard(null, false, page);
                 panel.MenuRequested += p =>
@@ -334,12 +336,6 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             }
             _panels[i].Apply(_settings.Panels[i]);
             if (_hw.Latest is { } snap) _panels[i].SetSnapshot(snap);
-        }
-        if (_panelItem != null)
-        {
-            _panelItem.Checked = _settings.Panels.FirstOrDefault()?.Enabled == true;
-            _panelLockItem.Checked = _settings.Panels.FirstOrDefault()?.Locked == true;
-            _panelLockItem.Enabled = _panelItem.Checked;
         }
     }
 
@@ -372,6 +368,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         _widget.SetSnapshot(snap);
         foreach (var extra in _extraWidgets.Values) extra.SetSnapshot(snap);
         foreach (var panel in _panels) panel.SetSnapshot(snap);
+        foreach (var editor in _editors.Values) editor.SetSnapshot(snap);
         if (_dash.OnScreen) _dash.SetSnapshot(snap);
         _settingsForm?.SetSnapshot(snap);
 
@@ -819,16 +816,11 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         };
         menu.Items.Add(_widgetItem);
 
-        _panelItem = new ToolStripMenuItem("Show desktop panel") { Checked = _settings.Panels.FirstOrDefault()?.Enabled == true };
-        _panelItem.Click += (_, _) => SetPanel(p => p.Enabled = !p.Enabled);
+        // Built each time it opens: one entry per panel. A locked panel lets clicks through, so it is unlocked here.
+        _panelItem = new ToolStripMenuItem("Desktop panels");
+        _panelItem.DropDownItems.Add(new ToolStripMenuItem("(none)"));
+        _panelItem.DropDownOpening += (_, _) => FillPanelsMenu(_panelItem);
         menu.Items.Add(_panelItem);
-        _panelLockItem = new ToolStripMenuItem("Lock desktop panel")
-        {
-            Checked = _settings.Panels.FirstOrDefault()?.Locked == true, Enabled = _settings.Panels.FirstOrDefault()?.Enabled == true,
-            ToolTipText = "A locked panel lets clicks through to the windows underneath",
-        };
-        _panelLockItem.Click += (_, _) => SetPanel(p => p.Locked = !p.Locked);
-        menu.Items.Add(_panelLockItem);
 
         var interval = new ToolStripMenuItem("Refresh every");
         foreach (var ms in new[] { 500, 1000, 2000, 5000 })
@@ -866,36 +858,71 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         return menu;
     }
 
-    /// <summary>Changes the (first) desktop panel, creating it from the Compact preset if there is none yet.</summary>
-    void SetPanel(Action<PanelLayout> change)
+    /// <summary>
+    /// Changes one desktop panel (by id; null for the first), creating one from the Compact preset if there is
+    /// none yet.
+    /// </summary>
+    void SetPanel(string? id, Action<PanelLayout> change)
     {
-        change(PanelPresets.EnsurePanel(_settings, _hw.Latest));
+        var panel = _settings.Panels.FirstOrDefault(p => p.Id == id) ?? PanelPresets.EnsurePanel(_settings, _hw.Latest);
+        change(panel);
         _settings.Save();
         SettingsChanged();
         _settingsForm?.PanelChanged();
     }
 
-    /// <summary>Right-click menu of a desktop panel (a locked panel lets clicks through, so it is unlocked from the tray menu).</summary>
+    void FillPanelsMenu(ToolStripMenuItem parent)
+    {
+        var items = parent.DropDownItems;
+        items.Clear();
+        if (_settings.Panels.Count == 0)
+            items.Add(new ToolStripMenuItem("Show a desktop panel", null, (_, _) => SetPanel(null, p => p.Enabled = true)));
+        foreach (var panel in _settings.Panels)
+        {
+            var id = panel.Id;
+            items.Add(new ToolStripMenuItem($"Show \"{panel.Name}\"", null, (_, _) => SetPanel(id, p => p.Enabled = !p.Enabled)) { Checked = panel.Enabled });
+        }
+        if (_settings.Panels.Count > 0)
+        {
+            bool allLocked = _settings.Panels.Where(p => p.Enabled).All(p => p.Locked) && _settings.Panels.Any(p => p.Enabled);
+            items.Add(new ToolStripMenuItem("Lock panels (clicks go through)", null, (_, _) =>
+            {
+                foreach (var p in _settings.Panels) p.Locked = !allLocked;
+                SetPanel(null, _ => { });
+            }) { Checked = allLocked, Enabled = _settings.Panels.Any(p => p.Enabled) });
+        }
+        items.Add(new ToolStripSeparator());
+        items.Add(new ToolStripMenuItem("Panel settings…", null, (_, _) => OpenSettings("panel")));
+        foreach (ToolStripItem item in items) ApplyDark(item);
+    }
+
+    /// <summary>Right-click menu of a desktop panel; acts on the panel that was clicked.</summary>
     ContextMenuStrip BuildPanelMenu()
     {
         var menu = new ContextMenuStrip { Renderer = new DarkMenuRenderer(), ShowImageMargin = false, ShowCheckMargin = true };
+        string? Target() => _panelMenuTarget?.Layout.Id;
         var modes = new (PanelMode Mode, string Text)[]
         {
             (PanelMode.AlwaysOnTop, "On top of windows"), (PanelMode.Normal, "Among windows"), (PanelMode.Desktop, "On the desktop (behind windows)"),
         };
         var modeItems = new List<(ToolStripMenuItem Item, PanelMode Mode)>();
-        menu.Items.Add(new ToolStripMenuItem("Panel settings…", null, (_, _) => OpenSettings("panel")) { Font = new Font(menu.Font, FontStyle.Bold) });
+        menu.Items.Add(new ToolStripMenuItem("Edit layout…", null, (_, _) => { if (Target() is { } id) EditPanel(id); }) { Font = new Font(menu.Font, FontStyle.Bold) });
+        menu.Items.Add(new ToolStripMenuItem("Panel settings…", null, (_, _) =>
+        {
+            OpenSettings("panel");
+            if (Target() is { } id) _settingsForm?.ShowPanel(id);
+        }));
         menu.Items.Add(new ToolStripSeparator());
         foreach (var (mode, text) in modes)
         {
-            var item = new ToolStripMenuItem(text, null, (_, _) => SetPanel(p => p.Mode = mode));
+            var item = new ToolStripMenuItem(text, null, (_, _) => SetPanel(Target(), p => p.Mode = mode));
             modeItems.Add((item, mode));
             menu.Items.Add(item);
         }
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("Lock (clicks go through)", null, (_, _) => SetPanel(p => p.Locked = true)));
-        menu.Items.Add(new ToolStripMenuItem("Reset position", null, (_, _) => SetPanel(p => p.Position = null)));
-        menu.Items.Add(new ToolStripMenuItem("Hide panel", null, (_, _) => SetPanel(p => p.Enabled = false)));
+        menu.Items.Add(new ToolStripMenuItem("Lock (clicks go through)", null, (_, _) => SetPanel(Target(), p => p.Locked = true)));
+        menu.Items.Add(new ToolStripMenuItem("Reset position", null, (_, _) => SetPanel(Target(), p => p.Position = null)));
+        menu.Items.Add(new ToolStripMenuItem("Hide panel", null, (_, _) => SetPanel(Target(), p => p.Enabled = false)));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Open dashboard", null, (_, _) => ShowDashboard()));
         menu.Opening += (_, _) =>
@@ -905,6 +932,57 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         };
         foreach (ToolStripItem item in menu.Items) ApplyDark(item);
         return menu;
+    }
+
+    // ---- Panel editor -------------------------------------------------------------------------
+
+    readonly Dictionary<string, PanelEditorForm> _editors = new();
+
+    public void EditPanel(string id)
+    {
+        if (_editors.TryGetValue(id, out var open) && !open.IsDisposed)
+        {
+            if (open.WindowState == FormWindowState.Minimized) open.WindowState = FormWindowState.Normal;
+            open.Activate();
+            return;
+        }
+        if (_settings.Panels.FirstOrDefault(p => p.Id == id) is not { } layout) return;
+        var editor = new PanelEditorForm(_settings, layout, () => _hw.Latest, _hw.GetHistory, saved =>
+        {
+            int i = _settings.Panels.FindIndex(p => p.Id == saved.Id);
+            if (i < 0) return; // removed in Settings while the editor was open
+            // Keep where and how it shows: those may have changed (dragged, menu) since the editor opened.
+            var live = _settings.Panels[i];
+            live.ApplyPreset(saved);
+            live.Preset = saved.Preset;
+            _settings.Save();
+            SettingsChanged();
+            _settingsForm?.PanelChanged();
+        });
+        _editors[id] = editor;
+        editor.FormClosed += (_, _) =>
+        {
+            _editors.Remove(id);
+            Native.TrimWorkingSet();
+        };
+        editor.Show();
+        editor.Activate();
+    }
+
+    /// <summary>"Add to the desktop panel" from a sensor in the dashboard: a tile on the first panel, which is shown.</summary>
+    void AddSensorToPanel(SensorKey key)
+    {
+        SetPanel(null, panel =>
+        {
+            var tile = new PanelTile
+            {
+                Kind = PanelTileKind.Value, Sensor = key, Visuals = PanelVisual.Label | PanelVisual.Number | PanelVisual.Bar,
+                Width = panel.CellWidth, Height = panel.CellHeight,
+            };
+            PanelGrid.Add(panel, tile);
+            panel.Enabled = true;
+            panel.Preset = null;
+        });
     }
 
     static void ApplyDark(ToolStripItem item)
@@ -969,6 +1047,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             TrayIconRenderer.Destroy(_logoHandle);
         }
         _settingsForm?.Close();
+        foreach (var editor in _editors.Values.ToList()) editor.Close();
         foreach (var extra in _extraWidgets.Values)
         {
             extra.AllowClose = true;
