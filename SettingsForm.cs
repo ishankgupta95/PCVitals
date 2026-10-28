@@ -76,6 +76,7 @@ sealed class SettingsForm : Form
         Controls.Add(_nav);
 
         AddPage("taskbar", "Taskbar", "", BuildTaskbar);
+        AddPage("panel", "Desktop panel", "", BuildPanel);
         AddPage("tray", "Tray icons", "", BuildTray);
         AddPage("graphics", "Graphics", "", BuildGraphics);
         AddPage("alerts", "Alerts", "", BuildAlerts);
@@ -346,6 +347,159 @@ sealed class SettingsForm : Form
                                 Toggle(_s.ShowOnAllDisplays, v => _s.ShowOnAllDisplays = v), ""));
         p.Controls.Add(new Card("Keep visible when the taskbar auto-hides", "Shows the stats as a small floating bar at the bottom of the screen while an auto-hiding taskbar is tucked away.",
                                 Toggle(_s.FloatWhenTaskbarHidden, v => _s.FloatWhenTaskbarHidden = v), ""));
+    }
+
+    // ---- Desktop panel ----------------------------------------------------------------------
+
+    FlowLayoutPanel? _panelPage;
+
+    /// <summary>The panel being edited, created from the Compact preset the first time something is changed.</summary>
+    PanelLayout EditedPanel => PanelPresets.EnsurePanel(_s, _host.Latest);
+
+    /// <summary>The panel's settings to show, without creating one just by looking.</summary>
+    PanelLayout PanelOrDefault => _s.Panels.FirstOrDefault() ?? PanelPresets.Build("compact", _host.Latest);
+
+    /// <summary>The panel was changed from its menu or the tray: show the new values.</summary>
+    public void PanelChanged()
+    {
+        if (_panelPage is not { IsDisposed: false } page) return;
+        BeginInvoke(() =>
+        {
+            page.SuspendLayout();
+            while (page.Controls.Count > 1)
+            {
+                var c = page.Controls[^1];
+                page.Controls.Remove(c);
+                c.Dispose();
+            }
+            _live.RemoveAll(c => c.IsDisposed);
+            BuildPanelBody(page);
+            page.ResumeLayout();
+            Stretch(page);
+        });
+    }
+
+    void BuildPanel(FlowLayoutPanel p)
+    {
+        _panelPage = p;
+        BuildPanelBody(p);
+    }
+
+    void BuildPanelBody(FlowLayoutPanel p)
+    {
+        var current = PanelOrDefault;
+        var preview = new LivePreview(c =>
+        {
+            var layout = PanelOrDefault;
+            float scale = c.DeviceDpi / 96f * Math.Clamp(layout.Scale, 50, 300) / 100f;
+            var size = PanelGrid.PanelSize(layout, scale);
+            // On a wallpaper-like backdrop, so a see-through panel looks as it will on the desktop.
+            int pad = (int)(16 * c.DeviceDpi / 96f);
+            var bmp = new Bitmap(size.Width + pad * 2, size.Height + pad * 2);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                PanelBackdrop.Paint(g, new Rectangle(0, 0, bmp.Width - 1, bmp.Height - 1), pad / 2);
+                using var panel = PanelRenderer.Render(layout, _host.Latest, scale, _s);
+                g.DrawImageUnscaled(panel, pad, pad);
+            }
+            return (bmp, layout.Enabled && _s.Panels.Count > 0 ? null : "The desktop panel is turned off.");
+        }, 200);
+        _live.Add(preview);
+        p.Controls.Add(preview);
+
+        p.Controls.Add(new Card("Show the desktop panel", "A floating panel of readings to leave on screen. Drag it to move it; right-click it for options; click a reading to open its page in the dashboard.",
+                                Toggle(current.Enabled && _s.Panels.Count > 0, v => EditedPanel.Enabled = v), ""));
+
+        p.Controls.Add(Section("Layout"));
+        p.Controls.Add(Hint("Pick a layout. Readings for devices this PC doesn't have are left out. Choosing your own readings and arranging the tiles comes in a later update."));
+        var gallery = new FlowLayoutPanel { AutoSize = true, WrapContents = true, BackColor = Theme.Bg, Margin = new Padding(0, 4, 0, 4), MaximumSize = new Size(Ui.S(p, 680), 0) };
+        var cards = new List<(PresetCard Card, string Id)>();
+        foreach (var (id, name, description) in PanelPresets.All)
+        {
+            var card = new PresetCard(name, description, () => PanelPresets.Build(id, _host.Latest), () => _host.Latest, () =>
+            {
+                EditedPanel.ApplyPreset(PanelPresets.Build(id, _host.Latest));
+                foreach (var (c, cid) in cards) { c.Selected = cid == id; c.Invalidate(); }
+                Changed();
+            }) { Selected = current.Preset == id };
+            cards.Add((card, id));
+            _live.Add(card);
+            gallery.Controls.Add(card);
+        }
+        p.Controls.Add(gallery);
+
+        p.Controls.Add(Section("Window"));
+        var modes = new[] { PanelMode.AlwaysOnTop, PanelMode.Normal, PanelMode.Desktop };
+        p.Controls.Add(new Card("Placement", "On the desktop, the panel stays behind your windows and comes back into view when you show the desktop (Windows+D).",
+                                Combo(new[] { "On top of windows", "Among windows", "On the desktop" }, Math.Max(0, Array.IndexOf(modes, current.Mode)), 200,
+                                      i => EditedPanel.Mode = modes[i]), ""));
+        p.Controls.Add(new Card("Lock", "Clicks go through the panel to the windows underneath, so it can't be moved by accident. Unlock it from the tray icon's menu.",
+                                Toggle(current.Locked, v => EditedPanel.Locked = v), ""));
+        p.Controls.Add(new Card("Hide during fullscreen games and videos", null,
+                                Toggle(current.HideInFullscreen, v => EditedPanel.HideInFullscreen = v), ""));
+
+        var screens = Screen.AllScreens;
+        var names = screens.Select((s, i) => $"Display {i + 1} ({s.Bounds.Width} × {s.Bounds.Height}{(s.Primary ? ", main" : "")})").ToArray();
+        int screenIndex = Math.Max(0, Array.FindIndex(screens, s => s.DeviceName == current.Monitor));
+        if (current.Monitor == null) screenIndex = Math.Max(0, Array.FindIndex(screens, s => s.Primary));
+        var display = Combo(names, screenIndex, 260, i =>
+        {
+            EditedPanel.Monitor = screens[i].DeviceName;
+            EditedPanel.MonitorSize = screens[i].Bounds.Size;
+            EditedPanel.Position = null;
+        });
+        var reset = new PillButton("Reset position", () =>
+        {
+            EditedPanel.Position = null;
+            Changed();
+        });
+        p.Controls.Add(new Card("Display", "Which monitor the panel is on. You can also drag it to another one.", new AccessoryRow(display, reset), ""));
+        p.Controls.Add(new Card("Fill the display", "Covers the whole monitor, sized to fit: for a small screen mounted in or on the case.",
+                                Toggle(current.FillDisplay, v => EditedPanel.FillDisplay = v), ""));
+        var sizes = new[] { 85, 100, 125, 150, 200 };
+        p.Controls.Add(new Card("Size", null,
+                                Combo(new[] { "Small", "Medium", "Large", "Extra large", "Huge" }, Math.Max(0, Array.IndexOf(sizes, current.Scale)), 160,
+                                      i => EditedPanel.Scale = sizes[i]), ""));
+
+        p.Controls.Add(Section("Colours"));
+        p.Controls.Add(Hint("Automatic colours follow the app theme (Appearance). Choosing a layout keeps the colours you set here only until you pick another layout."));
+        var opacities = new[] { 100, 88, 75, 50, 25, 0 };
+        var opacity = Combo(new[] { "Solid", "Slightly see-through", "See-through", "Half", "Faint", "None" },
+                            Math.Max(0, Array.IndexOf(opacities, current.Style.BackgroundOpacity)), 190, i => EditedPanel.Style.BackgroundOpacity = opacities[i]);
+        p.Controls.Add(new Card("Background", null, new AccessoryRow(opacity, ColorSetting(current.Style.Background, () => Theme.Bg, c => EditedPanel.Style.Background = c)), ""));
+        p.Controls.Add(new Card("Tile backgrounds", "A card behind each reading.", Toggle(current.Style.TileBackgrounds, v => EditedPanel.Style.TileBackgrounds = v), ""));
+        p.Controls.Add(new Card("Labels", null, ColorSetting(current.Style.LabelColor, () => Theme.TextDim, c => EditedPanel.Style.LabelColor = c), ""));
+        p.Controls.Add(new Card("Numbers", "Temperatures still turn amber and red when hot.", ColorSetting(current.Style.ValueColor, () => Theme.Text, c => EditedPanel.Style.ValueColor = c), ""));
+        p.Controls.Add(new Card("Bars, rings and graphs", "Automatic uses each device's colour (CPU blue, GPU green, memory purple…).",
+                                ColorSetting(current.Style.AccentColor, () => Theme.Cpu, c => EditedPanel.Style.AccentColor = c), ""));
+        p.Controls.Add(new PillButton("Reset colours", () =>
+        {
+            var style = EditedPanel.Style;
+            style.Background = style.LabelColor = style.ValueColor = style.AccentColor = style.TileBackground = null;
+            style.BackgroundOpacity = new PanelStyle().BackgroundOpacity;
+            style.TileBackgrounds = true;
+            Changed();
+            PanelChanged();
+        }) { Margin = new Padding(0, 8, 0, 8) });
+    }
+
+    /// <summary>A colour picker with a button that goes back to the automatic colour.</summary>
+    AccessoryRow ColorSetting(string? value, Func<Color> automatic, Action<string?> set)
+    {
+        var picker = new ColorPicker(PanelColor.Parse(value), automatic);
+        picker.ValueChanged += () =>
+        {
+            set(picker.Value is { } c ? PanelColor.ToHex(c) : null);
+            Changed();
+        };
+        var auto = new PillButton("Automatic", () =>
+        {
+            picker.Value = null;
+            set(null);
+            Changed();
+        });
+        return new AccessoryRow(picker, auto);
     }
 
     static string Describe(WidgetKind k) => k switch

@@ -24,8 +24,11 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     readonly TaskbarWidget _widget;
     // Strips on other displays' taskbars, keyed by taskbar window (when "Show on all displays" is on).
     readonly Dictionary<IntPtr, TaskbarWidget> _extraWidgets = new();
+    // Desktop panels, one per entry in settings (in order); only enabled ones are on screen.
+    readonly List<DesktopPanel> _panels = new();
     int _placementTicks;
     readonly ContextMenuStrip _menu;
+    readonly ContextMenuStrip _panelMenu;
     readonly Hotkeys _hotkeys = new();
     readonly System.Windows.Forms.Timer _placementTimer = new() { Interval = 1000 };
     readonly Dictionary<TrayMetric, NotifyIcon> _icons = new();
@@ -37,7 +40,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     AlertRule[] _alertRules = Array.Empty<AlertRule>();
     NotifyIcon? _logo;
     IntPtr _logoHandle;
-    ToolStripMenuItem _autostartItem = null!, _widgetItem = null!;
+    ToolStripMenuItem _autostartItem = null!, _widgetItem = null!, _panelItem = null!, _panelLockItem = null!;
     SettingsForm? _settingsForm;
     bool _taskbarLight = Theme.TaskbarIsLight();
     bool _exiting;
@@ -84,6 +87,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         _dash.Resize += (_, _) => DashboardShownChanged();
 
         _menu = BuildMenu();
+        _panelMenu = BuildPanelMenu();
         _widget = new TaskbarWidget(settings, _menu) { LightTaskbar = _taskbarLight };
         _widget.ItemClicked += v => ToggleDashboard(v.Kind, pageKey: v.Page);
         // Windows closing a window for us (shutdown, Task Scheduler "End") means the app should exit.
@@ -103,10 +107,12 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             if (_exiting || _widget.IsDisposed) return;
             _placementTimer.Interval = _widget.CheckPlacement() ? 150 : 1000;
             foreach (var extra in _extraWidgets.Values) extra.CheckPlacement();
+            foreach (var panel in _panels) panel.CheckPlacement();
             // Displays come and go rarely; look for added/removed taskbars every few seconds.
             if (++_placementTicks % 5 == 0) SyncExtraWidgets();
         };
         _placementTimer.Start();
+        SyncPanels();
 
         Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         ListenForExitSignal();
@@ -268,10 +274,11 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         _hw.IntervalMs = _settings.IntervalMs;
         _hw.PreferredGpuId = _settings.PrimaryGpuId;
         bool Shown(WidgetKind k) => _settings.WidgetEnabled && _settings.WidgetItems.Any(i => i.Enabled && i.Kind == k);
-        _hw.NeedStorage = Shown(WidgetKind.Disk);
-        _hw.NeedBoard = Shown(WidgetKind.Board);
-        _hw.NeedSecondGpu = Shown(WidgetKind.SecondGpu);
-        _hw.NeedBattery = Shown(WidgetKind.Battery);
+        var onPanels = _settings.Panels.Where(p => p.Enabled).SelectMany(p => p.Tiles).Select(PanelSources.Needs).ToList();
+        _hw.NeedStorage = Shown(WidgetKind.Disk) || onPanels.Any(n => n.Storage);
+        _hw.NeedBoard = Shown(WidgetKind.Board) || onPanels.Any(n => n.Board);
+        _hw.NeedSecondGpu = Shown(WidgetKind.SecondGpu) || onPanels.Any(n => n.SecondGpu);
+        _hw.NeedBattery = Shown(WidgetKind.Battery) || onPanels.Any(n => n.Battery);
         _hw.TrackedSensors = _settings.TrackedSensors(_hw.Latest);
         Volatile.Write(ref _alertRules, _settings.AlertRules.Select(r => r.Clone()).ToArray());
     }
@@ -297,6 +304,46 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             if (_hw.Latest is { } snap) w.SetSnapshot(snap);
         }
     }
+
+    /// <summary>One panel window per panel in settings, each showing its current layout.</summary>
+    void SyncPanels()
+    {
+        while (_panels.Count > _settings.Panels.Count)
+        {
+            var gone = _panels[^1];
+            _panels.RemoveAt(_panels.Count - 1);
+            gone.AllowClose = true;
+            gone.Close();
+            gone.Dispose();
+        }
+        for (int i = 0; i < _settings.Panels.Count; i++)
+        {
+            if (i == _panels.Count)
+            {
+                // Created only once a panel is switched on: no window, no cost before that.
+                if (!_settings.Panels[i].Enabled) break;
+                var panel = new DesktopPanel(_settings, _settings.Panels[i], _hw.GetHistory);
+                panel.TileClicked += page => ShowDashboard(null, false, page);
+                panel.MenuRequested += p =>
+                {
+                    _panelMenuTarget = panel;
+                    _panelMenu.Show(p);
+                };
+                panel.FormClosed += (_, _) => Exit();
+                _panels.Add(panel);
+            }
+            _panels[i].Apply(_settings.Panels[i]);
+            if (_hw.Latest is { } snap) _panels[i].SetSnapshot(snap);
+        }
+        if (_panelItem != null)
+        {
+            _panelItem.Checked = _settings.Panels.FirstOrDefault()?.Enabled == true;
+            _panelLockItem.Checked = _settings.Panels.FirstOrDefault()?.Locked == true;
+            _panelLockItem.Enabled = _panelItem.Checked;
+        }
+    }
+
+    DesktopPanel? _panelMenuTarget;
 
     /// <summary>On a laptop, turn the battery item on the first time a battery shows up.</summary>
     void EnableBatteryItemOnce(Snapshot snap)
@@ -324,6 +371,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         UpdateLogoTooltip(snap.Summary);
         _widget.SetSnapshot(snap);
         foreach (var extra in _extraWidgets.Values) extra.SetSnapshot(snap);
+        foreach (var panel in _panels) panel.SetSnapshot(snap);
         if (_dash.OnScreen) _dash.SetSnapshot(snap);
         _settingsForm?.SetSnapshot(snap);
 
@@ -520,6 +568,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         _widget.Redraw(force: true);
         SyncExtraWidgets();
         foreach (var extra in _extraWidgets.Values) extra.Redraw(force: true);
+        SyncPanels();
         _dash.ApplyTheme();
         _widgetItem.Checked = _settings.WidgetEnabled;
         foreach (var (value, item) in _intervalItems) item.Checked = value == _settings.IntervalMs;
@@ -685,10 +734,13 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
     {
         _dash.ApplyTheme();
         foreach (ToolStripItem item in _menu.Items) ApplyDark(item);
+        foreach (ToolStripItem item in _panelMenu.Items) ApplyDark(item);
         if (_settingsForm is { IsDisposed: false } form) form.ApplyTheme(); // recoloured in place, no reopen
         // The floating bar (auto-hidden taskbar) uses the app theme.
         _widget.Redraw(force: true);
         foreach (var extra in _extraWidgets.Values) extra.Redraw(force: true);
+        // Panels follow the app theme unless the user picked their own colours.
+        foreach (var panel in _panels) panel.Redraw(force: true);
     }
 
     void BeginInvokeSafe(Action action)
@@ -767,6 +819,17 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         };
         menu.Items.Add(_widgetItem);
 
+        _panelItem = new ToolStripMenuItem("Show desktop panel") { Checked = _settings.Panels.FirstOrDefault()?.Enabled == true };
+        _panelItem.Click += (_, _) => SetPanel(p => p.Enabled = !p.Enabled);
+        menu.Items.Add(_panelItem);
+        _panelLockItem = new ToolStripMenuItem("Lock desktop panel")
+        {
+            Checked = _settings.Panels.FirstOrDefault()?.Locked == true, Enabled = _settings.Panels.FirstOrDefault()?.Enabled == true,
+            ToolTipText = "A locked panel lets clicks through to the windows underneath",
+        };
+        _panelLockItem.Click += (_, _) => SetPanel(p => p.Locked = !p.Locked);
+        menu.Items.Add(_panelLockItem);
+
         var interval = new ToolStripMenuItem("Refresh every");
         foreach (var ms in new[] { 500, 1000, 2000, 5000 })
         {
@@ -799,6 +862,47 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => Exit()));
 
+        foreach (ToolStripItem item in menu.Items) ApplyDark(item);
+        return menu;
+    }
+
+    /// <summary>Changes the (first) desktop panel, creating it from the Compact preset if there is none yet.</summary>
+    void SetPanel(Action<PanelLayout> change)
+    {
+        change(PanelPresets.EnsurePanel(_settings, _hw.Latest));
+        _settings.Save();
+        SettingsChanged();
+        _settingsForm?.PanelChanged();
+    }
+
+    /// <summary>Right-click menu of a desktop panel (a locked panel lets clicks through, so it is unlocked from the tray menu).</summary>
+    ContextMenuStrip BuildPanelMenu()
+    {
+        var menu = new ContextMenuStrip { Renderer = new DarkMenuRenderer(), ShowImageMargin = false, ShowCheckMargin = true };
+        var modes = new (PanelMode Mode, string Text)[]
+        {
+            (PanelMode.AlwaysOnTop, "On top of windows"), (PanelMode.Normal, "Among windows"), (PanelMode.Desktop, "On the desktop (behind windows)"),
+        };
+        var modeItems = new List<(ToolStripMenuItem Item, PanelMode Mode)>();
+        menu.Items.Add(new ToolStripMenuItem("Panel settings…", null, (_, _) => OpenSettings("panel")) { Font = new Font(menu.Font, FontStyle.Bold) });
+        menu.Items.Add(new ToolStripSeparator());
+        foreach (var (mode, text) in modes)
+        {
+            var item = new ToolStripMenuItem(text, null, (_, _) => SetPanel(p => p.Mode = mode));
+            modeItems.Add((item, mode));
+            menu.Items.Add(item);
+        }
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("Lock (clicks go through)", null, (_, _) => SetPanel(p => p.Locked = true)));
+        menu.Items.Add(new ToolStripMenuItem("Reset position", null, (_, _) => SetPanel(p => p.Position = null)));
+        menu.Items.Add(new ToolStripMenuItem("Hide panel", null, (_, _) => SetPanel(p => p.Enabled = false)));
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("Open dashboard", null, (_, _) => ShowDashboard()));
+        menu.Opening += (_, _) =>
+        {
+            var mode = (_panelMenuTarget?.Layout ?? _settings.Panels.FirstOrDefault())?.Mode;
+            foreach (var (item, m) in modeItems) item.Checked = m == mode;
+        };
         foreach (ToolStripItem item in menu.Items) ApplyDark(item);
         return menu;
     }
@@ -872,6 +976,13 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             extra.Dispose();
         }
         _extraWidgets.Clear();
+        foreach (var panel in _panels)
+        {
+            panel.AllowClose = true;
+            panel.Close();
+            panel.Dispose();
+        }
+        _panels.Clear();
         _widget.AllowClose = true;
         _dash.AllowClose = true;
         if (!_widget.IsDisposed) _widget.Close();

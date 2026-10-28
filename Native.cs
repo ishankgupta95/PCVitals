@@ -209,18 +209,57 @@ static class Native
     }
 
     /// <summary>True while a game/video covers the whole monitor this taskbar is on, so the widget gets out of the way.</summary>
-    public static bool FullscreenAppActive(IntPtr taskbar)
+    public static bool FullscreenAppActive(IntPtr taskbar) =>
+        GetForegroundWindow() != taskbar && FullscreenAppOn(Screen.FromHandle(taskbar));
+
+    /// <summary>True while the foreground window is a game/video covering the whole of <paramref name="monitor"/>.</summary>
+    public static bool FullscreenAppOn(Screen monitor)
     {
         var fg = GetForegroundWindow();
-        if (fg == IntPtr.Zero || fg == taskbar) return false;
-        var cls = new StringBuilder(64);
-        GetClassName(fg, cls, cls.Capacity);
-        if (cls.ToString() is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd") return false;
+        if (fg == IntPtr.Zero) return false;
+        if (ClassOf(fg) is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd") return false;
         if (!GetWindowRect(fg, out var r)) return false;
         var screen = Screen.FromHandle(fg);
-        return screen.DeviceName == Screen.FromHandle(taskbar).DeviceName &&
+        return screen.DeviceName == monitor.DeviceName &&
                IsFullscreen(Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom), screen.Bounds, IsZoomed(fg) && HasFrame(fg));
     }
+
+    static string ClassOf(IntPtr hwnd)
+    {
+        var cls = new StringBuilder(64);
+        GetClassName(hwnd, cls, cls.Capacity);
+        return cls.ToString();
+    }
+
+    /// <summary>True while the desktop itself is in front: after "show desktop" (Win+D) or a click on the wallpaper.</summary>
+    public static bool DesktopInFront() => GetForegroundWindow() is var fg && fg != IntPtr.Zero && ClassOf(fg) is "Progman" or "WorkerW";
+
+    public static readonly IntPtr HWND_BOTTOM = new(1), HWND_NOTOPMOST = new(-2);
+    const int GWL_EXSTYLE = -20;
+    public const int WS_EX_TRANSPARENT = 0x20, WS_EX_TOPMOST = 0x8;
+
+    /// <summary>Sets or clears extended window style bits.</summary>
+    public static void SetExStyle(IntPtr hwnd, int bits, bool on)
+    {
+        long style = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
+        long next = on ? style | (uint)bits : style & ~(uint)bits;
+        if (next != style) SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(next));
+    }
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
+
+    public delegate void WinEventProc(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);
+
+    /// <summary>Calls <paramref name="proc"/> on this thread whenever another window comes to the front. Keep the delegate alive.</summary>
+    public static IntPtr HookForeground(WinEventProc proc) =>
+        SetWinEventHook(3 /* EVENT_SYSTEM_FOREGROUND */, 3, IntPtr.Zero, proc, 0, 0, 0 /* WINEVENT_OUTOFCONTEXT */);
+
+    [DllImport("user32.dll")]
+    static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr module, WinEventProc proc, uint process, uint thread, uint flags);
+
+    [DllImport("user32.dll")]
+    public static extern bool UnhookWinEvent(IntPtr hook);
 
     const int GWL_STYLE = -16;
     const uint WS_CAPTION = 0x00C00000, WS_THICKFRAME = 0x00040000;
@@ -292,6 +331,73 @@ static class Native
             ReleaseDC(IntPtr.Zero, screen);
         }
     }
+
+    /// <summary>
+    /// A top-down 32-bit premultiplied bitmap in GDI memory: GDI+ draws straight into it (<see cref="Bitmap"/>) and
+    /// <see cref="Present"/> hands it to a layered window, so redraws allocate nothing.
+    /// </summary>
+    public sealed class LayeredSurface : IDisposable
+    {
+        readonly IntPtr _dc, _dib, _old;
+        public Bitmap Bitmap { get; }
+        public Size Size { get; }
+
+        public LayeredSurface(Size size)
+        {
+            Size = new Size(Math.Max(1, size.Width), Math.Max(1, size.Height));
+            var info = new BITMAPINFOHEADER
+            {
+                Size = Marshal.SizeOf<BITMAPINFOHEADER>(), Width = Size.Width, Height = -Size.Height, Planes = 1, BitCount = 32,
+            };
+            IntPtr screen = GetDC(IntPtr.Zero);
+            _dc = CreateCompatibleDC(screen);
+            ReleaseDC(IntPtr.Zero, screen);
+            _dib = CreateDIBSection(_dc, ref info, 0, out var bits, IntPtr.Zero, 0);
+            if (_dib == IntPtr.Zero)
+            {
+                DeleteDC(_dc);
+                throw new OutOfMemoryException("CreateDIBSection failed");
+            }
+            _old = SelectObject(_dc, _dib);
+            Bitmap = new Bitmap(Size.Width, Size.Height, Size.Width * 4, System.Drawing.Imaging.PixelFormat.Format32bppPArgb, bits);
+        }
+
+        public void Present(IntPtr hwnd, Point pos)
+        {
+            IntPtr screen = GetDC(IntPtr.Zero);
+            try
+            {
+                var size = new SIZE { Cx = Size.Width, Cy = Size.Height };
+                var src = new POINT();
+                var dst = new POINT { X = pos.X, Y = pos.Y };
+                var blend = new BLENDFUNCTION { BlendOp = 0, SourceConstantAlpha = 255, AlphaFormat = 1 /* AC_SRC_ALPHA */ };
+                UpdateLayeredWindow(hwnd, screen, ref dst, ref size, _dc, ref src, 0, ref blend, 2 /* ULW_ALPHA */);
+            }
+            finally
+            {
+                ReleaseDC(IntPtr.Zero, screen);
+            }
+        }
+
+        public void Dispose()
+        {
+            Bitmap.Dispose();
+            SelectObject(_dc, _old);
+            DeleteObject(_dib);
+            DeleteDC(_dc);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct BITMAPINFOHEADER
+    {
+        public int Size, Width, Height;
+        public short Planes, BitCount;
+        public int Compression, SizeImage, XPelsPerMeter, YPelsPerMeter, ClrUsed, ClrImportant;
+    }
+
+    [DllImport("gdi32.dll")]
+    static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER info, uint usage, out IntPtr bits, IntPtr section, uint offset);
 
     [StructLayout(LayoutKind.Sequential)]
     struct APPBARDATA

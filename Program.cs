@@ -746,10 +746,39 @@ static class Program
             catch { }
         }
 
+        // Desktop panel presets, all six side by side on a stand-in wallpaper, in each theme.
+        foreach (var (file, mode) in new[]
+                 {
+                     ("panels.png", ThemeMode.Dark), ("panels-light.png", ThemeMode.Light), ("panels-amoled.png", ThemeMode.Amoled), ("panels-system.png", ThemeMode.System),
+                 })
+        {
+            Theme.Apply(mode);
+            var renders = PanelPresets.All.Select(p => PanelRenderer.Render(PanelPresets.Build(p.Id, snap), snap, scale, settings, hw.GetHistory)).ToList();
+            int pad = (int)(24 * scale);
+            using var bmp = new Bitmap(renders.Sum(r => r.Width) + pad * (renders.Count + 1), renders.Max(r => r.Height) + pad * 2);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                PanelBackdrop.Paint(g, new Rectangle(0, 0, bmp.Width, bmp.Height), 0);
+                int x = pad;
+                foreach (var r in renders)
+                {
+                    g.DrawImageUnscaled(r, x, pad);
+                    x += r.Width + pad;
+                    r.Dispose();
+                }
+            }
+            bmp.Save(Path.Combine(dir, file), ImageFormat.Png);
+        }
+        // The panel page in Settings shows the Gauges preset, switched on.
+        PanelPresets.EnsurePanel(settings, snap).ApplyPreset(PanelPresets.Build("gauges", snap));
+        settings.Panels[0].Enabled = true;
+
         // Settings pages.
         foreach (var (file, page, mode) in new[]
                  {
-                     ("settings-taskbar.png", "taskbar", ThemeMode.Dark), ("settings-appearance.png", "appearance", ThemeMode.Dark),
+                     ("settings-taskbar.png", "taskbar", ThemeMode.Dark), ("settings-panel.png", "panel", ThemeMode.Dark),
+                     ("settings-appearance.png", "appearance", ThemeMode.Dark),
                      ("settings-graphics-light.png", "graphics", ThemeMode.Light), ("settings-alerts.png", "alerts", ThemeMode.Dark),
                  })
         {

@@ -33,6 +33,18 @@ for a dashboard of every sensor in your machine.
   card with the session average. A sensor whose device is unplugged stays in place and shows `--`.
 - **Optional tray icons** (label + number, or number only) for CPU/GPU temperature and usage, RAM and power.
 
+### Desktop panel
+- **A floating panel of readings** to leave on screen: numbers, bars, ring gauges and history graphs, with a clock
+  and date. Switch it on in Settings → Desktop panel or from the tray icon's menu.
+- **Six layouts**: Compact, Gaming, Graphs, Gauges, Sidebar and Full system. Readings for devices your PC doesn't
+  have are left out.
+- **On top of windows, among them, or on the desktop** behind them (it comes back into view with Windows+D).
+  Lock it so clicks go through, hide it during fullscreen games and videos, and pick the display.
+- **Fill a display**: covers a whole monitor, sized to fit, for a small screen mounted in or on the case.
+- **Your colours**: background (solid to fully see-through), labels, numbers, and bars/graphs, or follow the app
+  theme. Temperatures turn amber and red when hot.
+- Drag it to move it, click a reading to open its page in the dashboard, right-click it for options.
+
 ### Dashboard
 - **Device rail** with live thumbnails (CPU, each GPU, memory, each drive,
   network, motherboard, battery/PSU when present). Click a taskbar item to jump straight to its page.

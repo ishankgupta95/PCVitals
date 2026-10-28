@@ -66,7 +66,7 @@ public sealed class SensorPref
 
 public sealed class AppSettings
 {
-    internal const int CurrentVersion = 4;
+    internal const int CurrentVersion = 5;
     static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PCVitals");
     static readonly string FilePath = Path.Combine(Dir, "settings.json");
     static readonly JsonSerializerOptions Json = new() { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
@@ -124,6 +124,10 @@ public sealed class AppSettings
     public bool PingEnabled { get; set; }
     /// <summary>Host to ping; empty for the default gateway (router).</summary>
     public string PingHost { get; set; } = "";
+
+    // Desktop panel
+    /// <summary>Floating panels (one for now); empty until the panel is first switched on.</summary>
+    public List<PanelLayout> Panels { get; set; } = new();
 
     // Alerts
     public List<AlertRule> AlertRules { get; set; } = DefaultAlertRules();
@@ -190,12 +194,14 @@ public sealed class AppSettings
 
     public void UnpinSensor(string sensorId) => WidgetItems.RemoveAll(i => i.Kind == WidgetKind.Sensor && i.Sensor?.Id == sensorId);
 
-    /// <summary>Sensors to keep history for: pinned (and switched on), watched by alerts, and favourites, by key.</summary>
+    /// <summary>Sensors to keep history for: pinned (and switched on), watched by alerts, shown on a panel, and favourites, by key.</summary>
     public List<SensorKey> TrackedSensors(Snapshot? snap)
     {
         var keys = WidgetItems.Where(i => i.Kind == WidgetKind.Sensor && i.Enabled && i.Sensor != null).Select(i => i.Sensor!).ToList();
         foreach (var rule in AlertRules)
             if (rule.Enabled && rule.Sensor is { } key && keys.All(k => k.Id != key.Id)) keys.Add(key);
+        foreach (var tile in Panels.Where(p => p.Enabled).SelectMany(p => p.Tiles))
+            if (tile.Sensor is { } key && keys.All(k => k.Id != key.Id)) keys.Add(key);
         if (snap != null)
             foreach (var (id, pref) in Sensors)
                 if (pref.Favorite && keys.All(k => k.Id != id) && snap.Catalog[id] is { } e) keys.Add(e.Key);
@@ -238,6 +244,7 @@ public sealed class AppSettings
         else if (settings.Version < CurrentVersion)
         {
             // v3 added per-sensor preferences (nothing to convert). v4 turned the three fixed alerts into rules.
+            // v5 added desktop panels (none until switched on).
             if (settings.Version < 4)
                 settings.AlertRules = DefaultAlertRules(settings.AlertCpuEnabled ?? false, settings.AlertCpuTemp ?? 90,
                                                         settings.AlertGpuEnabled ?? false, settings.AlertGpuTemp ?? 85,
@@ -249,6 +256,14 @@ public sealed class AppSettings
         }
         settings.Sensors ??= new();
         settings.AlertRules ??= new();
+        settings.Panels ??= new();
+        settings.Panels.RemoveAll(p => p == null!);
+        foreach (var panel in settings.Panels)
+        {
+            panel.Style ??= new PanelStyle();
+            panel.Tiles ??= new();
+            panel.Tiles.RemoveAll(t => t == null!);
+        }
         settings.AlertRules.RemoveAll(r => r == null! || (r.Sensor == null && (r.Series == null || !AlertRule.SeriesTargets.ContainsKey(r.Series))));
 
         // Keep the item list complete if new kinds were added in an update.

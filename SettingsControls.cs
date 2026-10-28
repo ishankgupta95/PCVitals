@@ -1056,3 +1056,159 @@ sealed class DragGhost : Form
         base.Dispose(disposing);
     }
 }
+
+/// <summary>A desktop panel preset in the gallery: a live thumbnail over a wallpaper-like backdrop, and its name.</summary>
+sealed class PresetCard : Control
+{
+    readonly Func<PanelLayout> _layout;
+    readonly Func<Snapshot?> _snapshot;
+    readonly string _name, _description;
+    bool _hover;
+    public bool Selected { get; set; }
+
+    public PresetCard(string name, string description, Func<PanelLayout> layout, Func<Snapshot?> snapshot, Action onClick)
+    {
+        _name = name;
+        _description = description;
+        _layout = layout;
+        _snapshot = snapshot;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.Selectable, true);
+        Size = new Size(204, 196);
+        Cursor = Cursors.Hand;
+        Margin = new Padding(0, 0, 12, 12);
+        TabStop = true;
+        AccessibleRole = AccessibleRole.RadioButton;
+        AccessibleName = $"{name} panel layout";
+        AccessibleDescription = description;
+        Click += (_, _) => onClick();
+    }
+
+    protected override AccessibleObject CreateAccessibilityInstance() => new PresetAccessible(this);
+
+    sealed class PresetAccessible(PresetCard owner) : ControlAccessibleObject(owner)
+    {
+        public override AccessibleStates State => base.State | (owner.Selected ? AccessibleStates.Checked : AccessibleStates.None);
+        public override void DoDefaultAction() => owner.OnClick(EventArgs.Empty);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.KeyCode is Keys.Space or Keys.Enter) OnClick(EventArgs.Empty);
+    }
+
+    protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+    protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hover = true; Invalidate(); }
+    protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hover = false; Invalidate(); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent?.BackColor ?? Theme.Bg);
+        var f = UiFonts.For(DeviceDpi);
+        var area = new Rectangle(Ui.S(this, 1), Ui.S(this, 1), Width - Ui.S(this, 3), Height - Ui.S(this, 50));
+        PanelBackdrop.Paint(g, area, Ui.S(this, 8));
+
+        var layout = _layout();
+        var natural = PanelGrid.PanelSize(layout, 1);
+        var room = Rectangle.Inflate(area, -Ui.S(this, 10), -Ui.S(this, 10));
+        float k = Math.Min(room.Width / (float)natural.Width, room.Height / (float)natural.Height);
+        using (var thumb = PanelRenderer.Render(layout, _snapshot(), k, null))
+            g.DrawImageUnscaled(thumb, room.Left + (room.Width - thumb.Width) / 2, room.Top + (room.Height - thumb.Height) / 2);
+
+        using (var path = Gfx.RoundedPath(area, Ui.S(this, 8)))
+        using (var pen = new Pen(Selected ? Theme.Cpu : _hover || Focused ? Theme.TextDim : Theme.Border, Selected || Focused ? Ui.S(this, 2) : 1))
+            g.DrawPath(pen, path);
+        Gfx.Text(g, _name, Selected ? f.BodyBold : f.Body, Theme.Text, new Rectangle(0, area.Bottom + Ui.S(this, 7), Width, Ui.S(this, 20)));
+        Gfx.Text(g, _description, f.Small, Theme.TextDim, new Rectangle(0, area.Bottom + Ui.S(this, 27), Width, Ui.S(this, 18)), TextFormatFlags.EndEllipsis);
+    }
+}
+
+/// <summary>A stand-in wallpaper behind panel previews, so see-through panels look as they will on the desktop.</summary>
+static class PanelBackdrop
+{
+    public static void Paint(Graphics g, Rectangle r, int radius)
+    {
+        using var path = Gfx.RoundedPath(r, radius);
+        using var brush = new LinearGradientBrush(r, Color.FromArgb(38, 64, 112), Color.FromArgb(104, 62, 108), LinearGradientMode.ForwardDiagonal);
+        g.FillPath(brush, path);
+    }
+}
+
+/// <summary>A colour setting: a swatch and its value; click to choose. Null means automatic (the theme's colour).</summary>
+sealed class ColorPicker : Control
+{
+    readonly Func<Color> _automatic;
+    bool _hover;
+    Color? _value;
+    public event Action? ValueChanged;
+
+    public ColorPicker(Color? value, Func<Color> automatic, int width = 150)
+    {
+        _value = value;
+        _automatic = automatic;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.Selectable, true);
+        Size = new Size(width, 32);
+        Cursor = Cursors.Hand;
+        TabStop = true;
+        AccessibleRole = AccessibleRole.PushButton;
+        Click += (_, _) => Choose();
+    }
+
+    public Color? Value
+    {
+        get => _value;
+        set
+        {
+            _value = value;
+            AccessibleDescription = Text = value is { } c ? PanelColor.ToHex(c) : "Automatic";
+            Invalidate();
+        }
+    }
+
+    void Choose()
+    {
+        using var dialog = new ColorDialog { Color = _value ?? _automatic(), FullOpen = true, AnyColor = true };
+        if (dialog.ShowDialog(FindForm()) != DialogResult.OK) return;
+        Value = Color.FromArgb(255, dialog.Color);
+        ValueChanged?.Invoke();
+    }
+
+    protected override void OnCreateControl()
+    {
+        base.OnCreateControl();
+        Value = _value;
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.KeyCode is Keys.Space or Keys.Enter) Choose();
+    }
+
+    protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+    protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hover = true; Invalidate(); }
+    protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hover = false; Invalidate(); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent?.BackColor ?? Theme.Surface);
+        var r = new Rectangle(0, 0, Width - 1, Height - 1);
+        Gfx.FillRounded(g, r, Ui.S(this, 6), _hover ? Theme.SurfaceHover : Theme.Bg);
+        using (var path = Gfx.RoundedPath(r, Ui.S(this, 6)))
+        using (var pen = new Pen(Focused ? Theme.TextDim : Theme.Border))
+            g.DrawPath(pen, path);
+        int d = Ui.S(this, 18);
+        var dot = new Rectangle(Ui.S(this, 8), (Height - d) / 2, d, d);
+        using (var brush = new SolidBrush(_value ?? _automatic())) g.FillEllipse(brush, dot);
+        using (var pen = new Pen(Theme.Border)) g.DrawEllipse(pen, dot);
+        var f = UiFonts.For(DeviceDpi);
+        Gfx.Text(g, _value is { } c ? PanelColor.ToHex(c) : "Automatic", f.Body, _value == null ? Theme.TextDim : Theme.Text,
+                 Rectangle.FromLTRB(dot.Right + Ui.S(this, 8), 0, r.Right - Ui.S(this, 6), Height), TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+}

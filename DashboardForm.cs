@@ -177,7 +177,7 @@ sealed class DashboardForm : Form
 
     static Size MinimumFor(int dpi) => new((int)(720 * dpi / 96f), (int)(480 * dpi / 96f));
 
-    static uint MonitorDpi(Point p)
+    internal static uint MonitorDpi(Point p)
     {
         try
         {

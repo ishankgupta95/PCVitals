@@ -77,7 +77,8 @@ static class Gfx
 
     /// <summary>Area sparkline, right-aligned so the newest sample sits on the right edge.</summary>
     /// <param name="stretch">Spread the values over the full width instead of right-aligning them on the 90-sample scale.</param>
-    public static void Sparkline(Graphics g, Rectangle r, float[]? values, float? fixedMax, Color color, float lineWidth, bool stretch = false)
+    /// <param name="slots">Right-align on this many samples instead of 90 (a graph not yet full starts part-way across).</param>
+    public static void Sparkline(Graphics g, Rectangle r, float[]? values, float? fixedMax, Color color, float lineWidth, bool stretch = false, int? slots = null)
     {
         if (values == null || values.Length < 2) return;
         float max = fixedMax ?? 0;
@@ -87,7 +88,7 @@ static class Gfx
             max = Math.Max(max * 1.15f, 1);
         }
 
-        int n = stretch ? values.Length : HardwareService.HistoryLength;
+        int n = stretch ? values.Length : Math.Max(values.Length, slots ?? HardwareService.HistoryLength);
         float step = r.Width / (float)(n - 1);
         int offset = n - values.Length;
         var pts = new PointF[values.Length];
