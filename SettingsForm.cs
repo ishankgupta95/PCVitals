@@ -559,6 +559,15 @@ sealed class SettingsForm : Form
         var opacity = Combo(new[] { "Solid", "Slightly see-through", "See-through", "Half", "Faint", "None" },
                             Math.Max(0, Array.IndexOf(opacities, current.Style.BackgroundOpacity)), 190, i => EditedPanel.Style.BackgroundOpacity = opacities[i]);
         p.Controls.Add(new Card("Background", null, new AccessoryRow(opacity, ColorSetting(current.Style.Background, () => Theme.Bg, c => EditedPanel.Style.Background = c)), ""));
+        var angles = new[] { 0, 45, 90, 135, 180, 225, 270, 315 };
+        var gradient = Combo(new[] { "None", "Linear", "Radial" }, (int)current.Style.Gradient, 120, i => EditedPanel.Style.Gradient = (PanelGradient)i);
+        var angle = Combo(new[] { "→", "↘", "↓", "↙", "←", "↖", "↑", "↗" }, Math.Max(0, Array.IndexOf(angles, current.Style.GradientAngle)), 70,
+                          i => EditedPanel.Style.GradientAngle = angles[i]);
+        angle.AccessibleName = "Gradient direction";
+        p.Controls.Add(new Card("Background gradient", "Shades the background from its colour to a second one. Direction applies to linear gradients.",
+                                new AccessoryRow(gradient, angle, ColorSetting(current.Style.GradientColor,
+                                    () => PanelColor.GradientEnd(new PanelStyle(), PanelColor.Parse(current.Style.Background) ?? Theme.Bg),
+                                    c => EditedPanel.Style.GradientColor = c)), ""));
         p.Controls.Add(new Card("Tile backgrounds", "A card behind each reading.", Toggle(current.Style.TileBackgrounds, v => EditedPanel.Style.TileBackgrounds = v), ""));
         p.Controls.Add(new Card("Labels", null, ColorSetting(current.Style.LabelColor, () => Theme.TextDim, c => EditedPanel.Style.LabelColor = c), ""));
         p.Controls.Add(new Card("Numbers", "Temperatures still turn amber and red when hot.", ColorSetting(current.Style.ValueColor, () => Theme.Text, c => EditedPanel.Style.ValueColor = c), ""));
@@ -567,12 +576,32 @@ sealed class SettingsForm : Form
         p.Controls.Add(new PillButton("Reset colours", () =>
         {
             var style = EditedPanel.Style;
-            style.Background = style.LabelColor = style.ValueColor = style.AccentColor = style.TileBackground = null;
+            style.Background = style.LabelColor = style.ValueColor = style.AccentColor = style.TileBackground = style.GradientColor = null;
             style.BackgroundOpacity = new PanelStyle().BackgroundOpacity;
             style.TileBackgrounds = true;
+            style.Gradient = PanelGradient.None;
             Changed();
             PanelChanged();
         }) { Margin = new Padding(0, 8, 0, 8) });
+
+        p.Controls.Add(Section("Motion and effects"));
+        p.Controls.Add(Hint("Drawn by your graphics card. A still panel draws nothing between readings; animations only run while something moves."));
+        p.Controls.Add(new Card("Draw with the graphics card", "Needed for animations, glow and moving backgrounds. Turn off to draw with the processor as before (no animations).",
+                                Toggle(current.Accelerated, v => EditedPanel.Accelerated = v), ""));
+        var motions = new[] { PanelMotion.Off, PanelMotion.Smooth, PanelMotion.Full };
+        p.Controls.Add(new Card("Motion", "Smooth: numbers, bars and gauges glide to each new reading. Full: graphs also scroll continuously.",
+                                Combo(new[] { "Off", "Smooth", "Full" }, Math.Max(0, Array.IndexOf(motions, current.Style.Motion)), 140,
+                                      i => EditedPanel.Style.Motion = motions[i]), ""));
+        var rates = new[] { 30, 60 };
+        p.Controls.Add(new Card("Frame rate", "While something moves. 30 uses about half the processor time of 60.",
+                                Combo(new[] { "30 fps", "60 fps" }, Math.Max(0, Array.IndexOf(rates, current.Style.FrameRate)), 140,
+                                      i => EditedPanel.Style.FrameRate = rates[i]), ""));
+        p.Controls.Add(new Card("Moving background", "The gradient slowly turns (linear) or drifts (radial). Keeps the panel drawing at its frame rate.",
+                                Toggle(current.Style.AnimateBackground, v => EditedPanel.Style.AnimateBackground = v), ""));
+        p.Controls.Add(new Card("Glow", "A soft glow around bars, gauges and graph lines.",
+                                Toggle(current.Style.Glow, v => EditedPanel.Style.Glow = v), ""));
+        p.Controls.Add(new Card("Shaded bars and gauges", "Bars and gauges shade from dim at the empty end to full colour at the reading.",
+                                Toggle(current.Style.GradientFills, v => EditedPanel.Style.GradientFills = v), ""));
     }
 
     /// <summary>A colour picker with a button that goes back to the automatic colour.</summary>

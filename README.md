@@ -56,6 +56,16 @@ for a dashboard of every sensor in your machine.
 - **Fill a display**: covers a whole monitor, sized to fit, for a small screen mounted in or on the case.
 - **Your colours**: background (solid to fully see-through), labels, numbers, and bars/graphs, or follow the app
   theme. Temperatures turn amber and red when hot.
+- **Background gradients**: linear (in any of eight directions) or radial, from the background colour to a second
+  colour of your choice.
+- **Motion and effects** (Settings → Desktop panel → Motion and effects), drawn by the graphics card:
+  - **Smooth** motion: numbers count, and bars, gauges and colours glide to each new reading.
+  - **Full** motion: graphs also scroll continuously instead of stepping once per reading.
+  - A **moving background**: the gradient slowly turns (linear) or drifts (radial).
+  - **Glow** around bars, gauges and graph lines, and **shaded bars and gauges** (dim at the empty end, full
+    colour at the reading).
+  - **30 or 60 fps** while something moves. A still panel draws nothing between readings.
+  - Turn off "Draw with the graphics card" to go back to the classic CPU drawing (no animations).
 - Drag it to move it, click a reading to open its page in the dashboard, right-click it for options. Any sensor
   can be added from its menu in the dashboard ("Add to the desktop panel").
 
@@ -196,6 +206,13 @@ How it stays light:
 - **Deferred discovery**: drives, USB/HID controllers, PSUs and batteries are probed after the first reading,
   so the taskbar fills in sooner.
 - **Draw only on change**: the strip and tray icons re-render only when what they show changes.
+- **Desktop panel on the GPU**: Direct2D through DirectComposition, on its own render thread. Labels, tracks, tile
+  cards and pictures are drawn once and kept on the GPU. Text layouts, gradients and shapes are reused from frame
+  to frame, and graph lines are tessellated once per reading and only moved while they scroll. Measured on a
+  1336×1220 panel with every tile changing each second, as a share of one core: **0.7 %** with motion off,
+  **~4 %** with smooth motion, **~6.5 %** with full motion at 60 fps (the classic CPU drawing is 1.7 % with no
+  animation). The graphics driver adds roughly 50 MB of private memory once a panel is on screen; turning off
+  "Draw with the graphics card" avoids it.
 - **Cheap process list**: top processes come from one `NtQuerySystemInformation` call per refresh (no
   per-process handles), and only while a page that shows them is open.
 - **Startup and footprint**: ReadyToRun (no JIT warm-up), invariant globalization (no ICU), non-concurrent
@@ -241,6 +258,8 @@ Found a bug? Please [open an issue](../../issues/new/choose) and attach the sens
 | `TaskbarWidget.cs` / `StripFit.cs` | The per-pixel-alpha layered window drawn on the taskbar, and its fit rules |
 | `tests/PCVitals.Tests` | Unit tests (xUnit) |
 | `HoverCard.cs` | Detail card shown when hovering a taskbar item |
+| `DesktopPanel.cs` / `PanelRenderer.cs` | The desktop panel window, and its classic GDI+ drawing (also used for previews and the still layer) |
+| `GpuSurface.cs` / `GpuPanelRenderer.cs` | The panel's GPU path: Direct2D + DirectComposition surface, the animating renderer and its render thread |
 | `DashboardForm.cs` / `DashboardView.cs` | The dashboard window (owner-drawn) |
 | `SettingsForm.cs` / `SettingsControls.cs` | Settings window and its toggle, card, dropdown and preview controls |
 | `SensorDialogs.cs` | The sensor picker and the rename prompt |
@@ -259,3 +278,4 @@ MIT, see [LICENSE](LICENSE). LibreHardwareMonitor is used under its own MPL-2.0 
 
 - Sensor access by [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)
   (MPL-2.0), using the [PawnIO](https://pawnio.eu/) driver.
+- Direct2D, DirectWrite and DirectComposition bindings by [Vortice.Windows](https://github.com/amerkoleci/Vortice.Windows) (MIT).

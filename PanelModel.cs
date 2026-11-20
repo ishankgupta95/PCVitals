@@ -98,7 +98,43 @@ public sealed class PanelStyle
     /// <summary>Bars, rings and graphs; null for each device's own colour (CPU blue, GPU green…).</summary>
     public string? AccentColor { get; set; }
 
+    public PanelGradient Gradient { get; set; }
+    /// <summary>Where the gradient ends; null for the background tinted with the theme's accent.</summary>
+    public string? GradientColor { get; set; }
+    /// <summary>Linear gradients: degrees clockwise from left-to-right.</summary>
+    public int GradientAngle { get; set; } = 135;
+    /// <summary>The gradient slowly turns (linear) or drifts (radial). GPU renderer only.</summary>
+    public bool AnimateBackground { get; set; }
+    public PanelMotion Motion { get; set; } = PanelMotion.Smooth;
+    /// <summary>Frames per second while something moves (30 or 60); a still panel draws nothing.</summary>
+    public int FrameRate { get; set; } = 60;
+    /// <summary>A soft glow around bars, gauges and graph lines. GPU renderer only.</summary>
+    public bool Glow { get; set; }
+    /// <summary>Bars and gauges shade from a dim to a bright accent along their length.</summary>
+    public bool GradientFills { get; set; }
+
     public PanelStyle Clone() => (PanelStyle)MemberwiseClone();
+}
+
+/// <summary>How the panel's background colour is shaded.</summary>
+public enum PanelGradient
+{
+    None,
+    /// <summary>From the background colour to <see cref="PanelStyle.GradientColor"/> along <see cref="PanelStyle.GradientAngle"/>.</summary>
+    Linear,
+    /// <summary>The background colour in the middle, fading out to <see cref="PanelStyle.GradientColor"/> at the edges.</summary>
+    Radial,
+}
+
+/// <summary>How much the panel moves between readings. Only the GPU renderer animates.</summary>
+public enum PanelMotion
+{
+    /// <summary>Each reading is drawn as it arrives.</summary>
+    Off,
+    /// <summary>Numbers, bars, gauges and colours glide to each new reading.</summary>
+    Smooth,
+    /// <summary>Also scrolls graphs continuously instead of stepping once per reading.</summary>
+    Full,
 }
 
 public sealed class PanelTile
@@ -180,6 +216,8 @@ public sealed class PanelLayout
     public bool FillDisplay { get; set; }
     /// <summary>Size in percent, on top of the monitor's scaling.</summary>
     public int Scale { get; set; } = 100;
+    /// <summary>Drawn on the GPU (Direct2D), which is what animates it; off for the classic CPU renderer.</summary>
+    public bool Accelerated { get; set; } = true;
 
     public int Columns { get; set; } = 2;
     public int Rows { get; set; } = 2;
@@ -474,6 +512,21 @@ static class PanelColor
     }
 
     public static string ToHex(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+
+    /// <summary>Mixes <paramref name="a"/> towards <paramref name="b"/> (0 = a, 1 = b), alpha included.</summary>
+    public static Color Mix(Color a, Color b, float t)
+    {
+        t = Math.Clamp(t, 0, 1);
+        int L(int x, int y) => (int)Math.Round(x + (y - x) * t);
+        return Color.FromArgb(L(a.A, b.A), L(a.R, b.R), L(a.G, b.G), L(a.B, b.B));
+    }
+
+    /// <summary>Where a background gradient ends: the chosen colour, or the background tinted with the theme's accent.</summary>
+    public static Color GradientEnd(PanelStyle style, Color background) =>
+        Parse(style.GradientColor) ?? Mix(background, Color.FromArgb(background.A, Theme.Cpu), 0.38f);
+
+    /// <summary>The dim end of a gradient fill in <paramref name="accent"/> (bars, gauges).</summary>
+    public static Color FillStart(Color accent) => Mix(accent, Color.FromArgb(accent.A, 0, 0, 0), 0.55f);
 
     /// <summary>The threshold colour a value has reached, or null below all of them.</summary>
     public static Color? ForValue(IReadOnlyList<PanelThreshold> thresholds, float? value)

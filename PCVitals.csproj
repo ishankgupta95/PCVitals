@@ -54,6 +54,9 @@
     <!-- Exact version: HardwareService relies on a few of its internals (see the *Gate classes).
          Re-check those, and the log, before upgrading. -->
     <PackageReference Include="LibreHardwareMonitorLib" Version="[0.9.6]" />
+    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DirectComposition" Version="3.8.3" />
   </ItemGroup>
 
 </Project>

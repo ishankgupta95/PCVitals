@@ -1,9 +1,13 @@
 namespace PCVitals;
 
 /// <summary>
-/// A floating panel of readings on the desktop (<see cref="PanelLayout"/>). Like the taskbar strip it is
-/// a per-pixel-alpha layered window that never takes focus, and it is redrawn only when what it shows
-/// changes. It can sit on top of other windows, among them, or behind them like part of the wallpaper.
+/// A floating panel of readings on the desktop (<see cref="PanelLayout"/>), a window that never takes focus.
+/// It can sit on top of other windows, among them, or behind them like part of the wallpaper.
+/// <para>
+/// Normally it is drawn on the GPU (<see cref="GpuPanelHost"/>): a DirectComposition window whose render thread
+/// animates between readings and draws nothing while still. If the GPU path is off or unavailable it is a
+/// per-pixel-alpha layered window drawn with GDI+, like the taskbar strip, redrawn only when what it shows changes.
+/// </para>
 /// </summary>
 sealed class DesktopPanel : Form
 {
@@ -13,6 +17,17 @@ sealed class DesktopPanel : Form
     IntPtr _foregroundHook;
     PanelRenderer _renderer;
     Native.LayeredSurface? _surface;
+
+    /// <summary>Whether this PC can draw panels on the GPU; probed once, the first time a panel is shown.</summary>
+    static readonly Lazy<bool> GpuAvailable = new(GpuSurface.Probe);
+    /// <summary>How the current window handle was made (decided when it is created).</summary>
+    bool _gpu;
+    GpuPanelHost? _host;
+    PanelLayout? _gpuLayout;
+    string? _gpuStaticKey;
+    Size _gpuSize;
+
+    bool WantsGpu => Layout is { Accelerated: true } && GpuAvailable.Value;
     Snapshot? _snap;
     string? _signature;
     Point _pos, _origin;
@@ -57,6 +72,10 @@ sealed class DesktopPanel : Form
             cp.ExStyle |= 0x80000 | 0x80 | 0x08000000; // LAYERED | TOOLWINDOW | NOACTIVATE
             // Form's own constructor reads this before ours has set the layout.
             if (Layout is not { } layout) return cp;
+            // GPU: no redirection bitmap, the window's pixels come from DirectComposition. It stays layered (at full
+            // opacity) because only layered windows let clicks through when locked.
+            if (!IsHandleCreated) _gpu = WantsGpu;
+            if (_gpu) cp.ExStyle |= 0x00200000; // NOREDIRECTIONBITMAP
             if (layout.Locked) cp.ExStyle |= Native.WS_EX_TRANSPARENT;
             if (layout.Mode == PanelMode.AlwaysOnTop) cp.ExStyle |= Native.WS_EX_TOPMOST;
             return cp;
@@ -67,6 +86,24 @@ sealed class DesktopPanel : Form
     {
         base.OnHandleCreated(e);
         _foregroundHook = Native.HookForeground(_foregroundProc);
+        if (_gpu) Native.SetLayeredWindowAttributes(Handle, 0, 255, 2 /* LWA_ALPHA */);
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        // The swap chain belongs to this window handle; a new handle gets a new one.
+        _host?.Dispose();
+        _host = null;
+        _gpuStaticKey = null;
+        if (_foregroundHook != IntPtr.Zero) Native.UnhookWinEvent(_foregroundHook);
+        _foregroundHook = IntPtr.Zero;
+        base.OnHandleDestroyed(e);
+    }
+
+    // DirectComposition draws the window; GDI painting would only be thrown away.
+    protected override void OnPaintBackground(PaintEventArgs e)
+    {
+        if (!_gpu) base.OnPaintBackground(e);
     }
 
     /// <summary>The layout or settings changed: rebuild the drawing and re-apply the window options.</summary>
@@ -75,6 +112,18 @@ sealed class DesktopPanel : Form
         Layout = layout;
         _renderer.Dispose();
         _renderer = NewRenderer(layout);
+        _gpuLayout = layout.Clone();
+        _gpuStaticKey = null;
+        if (IsHandleCreated && _gpu != WantsGpu)
+        {
+            // Switching renderers needs a differently made window.
+            bool shown = Visible;
+            _signature = null;
+            _surface?.Dispose();
+            _surface = null;
+            RecreateHandle();
+            if (!shown && Visible) Hide();
+        }
         if (IsHandleCreated)
         {
             Native.SetExStyle(Handle, Native.WS_EX_TRANSPARENT, layout.Locked);
@@ -109,6 +158,14 @@ sealed class DesktopPanel : Form
         _origin = origin;
         _pos = pos;
 
+        if (!IsHandleCreated) _gpu = WantsGpu; // the window is made by Show() below, the way this says
+        if (_gpu)
+        {
+            PresentGpu(frame, size, scale, origin);
+            _clock.Enabled = _renderer.HasClock;
+            return;
+        }
+
         if (_surface == null || _surface.Size != size)
         {
             _surface?.Dispose();
@@ -129,10 +186,57 @@ sealed class DesktopPanel : Form
         _clock.Enabled = _renderer.HasClock;
     }
 
+    /// <summary>Hands a reading to the render thread, moving and sizing the window to match first.</summary>
+    void PresentGpu(PanelRenderer.Frame frame, Size size, float scale, Point origin)
+    {
+        var bounds = new Rectangle(_pos, size);
+        if (!Visible)
+        {
+            Bounds = bounds;
+            _gpuSize = size;
+            Show();
+            ApplyZOrder();
+        }
+        else if (_gpuSize != size || Bounds.Location != _pos)
+        {
+            Native.SetWindowPos(Handle, IntPtr.Zero, _pos.X, _pos.Y, size.Width, size.Height, Native.SWP_NOACTIVATE | 0x0004 /* NOZORDER */);
+            _gpuSize = size;
+        }
+        if (_host == null)
+        {
+            _host = new GpuPanelHost(Handle);
+            // A new GPU device has no still layer: make it again on the UI thread.
+            _host.StaticLost += () => BeginInvoke(() =>
+            {
+                _gpuStaticKey = null;
+                Redraw(force: true);
+            });
+        }
+
+        var layout = _gpuLayout ??= Layout.Clone();
+        bool fill = Layout.FillDisplay;
+        var key = _renderer.StaticKey(frame, size, scale, origin, fill) + "|" + Layout.Locked;
+        Bitmap? still = null;
+        if (key != _gpuStaticKey)
+        {
+            still = _renderer.RenderStatic(frame, size, scale, origin, fill, background: false);
+            _gpuStaticKey = key;
+        }
+        int alpha = Math.Clamp(Layout.Style.BackgroundOpacity, 0, 100) * 255 / 100;
+        var bg = Theme.WithAlpha(PanelColor.Parse(Layout.Style.Background) ?? Theme.Bg, alpha);
+        _host.Post(new GpuPanelRenderer.Job
+        {
+            Layout = layout, Frame = frame, Canvas = size, Scale = scale, Origin = origin, Fill = fill, Static = still,
+            Background = bg, GradientEnd = Theme.WithAlpha(PanelColor.GradientEnd(Layout.Style, bg), alpha), IntervalMs = _settings.IntervalMs,
+        });
+    }
+
     void HidePanel()
     {
         _clock.Enabled = false;
         _signature = null;
+        _gpuStaticKey = null;
+        _host?.Suspend();
         if (Visible) Hide();
         // A hidden panel's pixels would only take memory.
         _surface?.Dispose();

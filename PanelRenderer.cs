@@ -44,6 +44,10 @@ sealed class PanelRenderer : IDisposable
         public Color Accent, ValueColor;
         public float[]? Graph;
         public float? GraphMax;
+        /// <summary>The number as a value, when it can glide between readings (re-formatted as it moves).</summary>
+        public float? Value;
+        public PanelUnit RawUnit;
+        public int? Decimals;
     }
 
     /// <summary>Everything a frame shows, and a signature of it so unchanged frames can be skipped.</summary>
@@ -97,6 +101,12 @@ sealed class PanelRenderer : IDisposable
             if (r.Text != null && r.Value == null) number = "--";
             st.Number = number;
             st.Unit = tile.ShowUnit ? unit : "";
+            if (r.Text == null && r.Value is { } numeric && !float.IsNaN(numeric))
+            {
+                st.Value = numeric;
+                st.RawUnit = r.Unit;
+                st.Decimals = tile.Decimals;
+            }
 
             if (r.Value is { } v && !float.IsNaN(v)) _seenMax[tile] = Math.Max(_seenMax.GetValueOrDefault(tile), v);
             float max = tile.Max ?? r.Max ?? AutoMax(r.Unit, _seenMax.GetValueOrDefault(tile));
@@ -169,23 +179,35 @@ sealed class PanelRenderer : IDisposable
     /// </summary>
     public void Draw(Graphics g, Frame frame, Size canvas, float scale, Point origin, bool fill)
     {
-        var key = $"{canvas}|{scale}|{origin}|{fill}|{Theme.Bg.ToArgb()}|{Theme.Text.ToArgb()}|" + string.Join("\u0001", frame.Tiles.Select(t => t.Label));
+        var key = StaticKey(frame, canvas, scale, origin, fill);
         if (_static == null || _staticKey != key)
         {
             _static?.Dispose();
-            _static = new Bitmap(Math.Max(1, canvas.Width), Math.Max(1, canvas.Height), PixelFormat.Format32bppPArgb);
-            using (var sg = Graphics.FromImage(_static))
-            {
-                Setup(sg);
-                sg.Clear(Color.Transparent);
-                DrawStatic(sg, frame, canvas, scale, origin, fill);
-            }
+            _static = RenderStatic(frame, canvas, scale, origin, fill, background: true);
             _staticKey = key;
         }
         g.CompositingMode = CompositingMode.SourceOver;
         g.DrawImageUnscaled(_static, 0, 0);
         Setup(g);
         DrawDynamic(g, frame, scale, origin);
+    }
+
+    /// <summary>Identifies the cached layer: it is redrawn when this changes.</summary>
+    internal string StaticKey(Frame frame, Size canvas, float scale, Point origin, bool fill) =>
+        $"{canvas}|{scale}|{origin}|{fill}|{Theme.Bg.ToArgb()}|{Theme.Text.ToArgb()}|" + string.Join("\u0001", frame.Tiles.Select(t => t.Label));
+
+    /// <summary>
+    /// The parts that don't change between readings, in a new premultiplied bitmap. Without
+    /// <paramref name="background"/> the panel's colour and gradient are left out (the GPU renderer draws and animates them).
+    /// </summary>
+    internal Bitmap RenderStatic(Frame frame, Size canvas, float scale, Point origin, bool fill, bool background)
+    {
+        var bmp = new Bitmap(Math.Max(1, canvas.Width), Math.Max(1, canvas.Height), PixelFormat.Format32bppPArgb);
+        using var sg = Graphics.FromImage(bmp);
+        Setup(sg);
+        sg.Clear(Color.Transparent);
+        DrawStatic(sg, frame, canvas, scale, origin, fill, background);
+        return bmp;
     }
 
     static void Setup(Graphics g)
@@ -205,24 +227,20 @@ sealed class PanelRenderer : IDisposable
 
     string FamilyOf(PanelTile t) => string.IsNullOrWhiteSpace(t.FontFamily) ? _layout.Style.FontFamily : t.FontFamily!;
 
-    void DrawStatic(Graphics g, Frame frame, Size canvas, float scale, Point origin, bool fill)
+    void DrawStatic(Graphics g, Frame frame, Size canvas, float scale, Point origin, bool fill, bool background)
     {
         var style = _layout.Style;
         int alpha = Math.Clamp(style.BackgroundOpacity, 0, 100) * 255 / 100;
         int radius = (int)Math.Round(style.CornerRadius * scale);
-        if (alpha > 0)
+        if (alpha > 0 && background)
         {
             var bg = Theme.WithAlpha(PanelColor.Parse(style.Background) ?? Theme.Bg, alpha);
-            if (fill)
-            {
-                using var b = new SolidBrush(bg);
-                g.FillRectangle(b, 0, 0, canvas.Width, canvas.Height);
-            }
+            var area = fill ? new Rectangle(Point.Empty, canvas) : new Rectangle(origin, PanelGrid.PanelSize(_layout, scale) - new Size(1, 1));
+            using var brush = BackgroundBrush(style, area, bg, alpha);
+            if (fill) g.FillRectangle(brush, area);
             else
-            {
-                var size = PanelGrid.PanelSize(_layout, scale);
-                Gfx.FillRounded(g, new Rectangle(origin.X, origin.Y, size.Width - 1, size.Height - 1), radius, bg);
-            }
+                using (var path = Gfx.RoundedPath(area, radius))
+                    g.FillPath(brush, path);
         }
         if (PanelImages.Get(style.BackgroundImage) is { } picture)
         {
@@ -285,8 +303,21 @@ sealed class PanelRenderer : IDisposable
         }
     }
 
+    /// <summary>The panel's background: its colour, or a gradient from it (still; the GPU renderer can animate it).</summary>
+    static Brush BackgroundBrush(PanelStyle style, Rectangle area, Color bg, int alpha)
+    {
+        if (style.Gradient == PanelGradient.None || area.Width <= 0 || area.Height <= 0) return new SolidBrush(bg);
+        var end = Theme.WithAlpha(PanelColor.GradientEnd(style, bg), alpha);
+        if (style.Gradient == PanelGradient.Linear)
+            return new LinearGradientBrush(area, bg, end, style.GradientAngle, isAngleScaleable: false);
+        // Radial: an ellipse a little larger than the area, so the edge colour reaches the corners.
+        using var path = new GraphicsPath();
+        path.AddEllipse(RectangleF.Inflate(area, area.Width * 0.21f, area.Height * 0.21f));
+        return new PathGradientBrush(path) { CenterColor = bg, SurroundColors = new[] { end } };
+    }
+
     /// <summary>Where a gauge starts and how far it goes, in degrees clockwise from 3 o'clock.</summary>
-    static (float Start, float Sweep) Arc(PanelGaugeStyle style) => style switch
+    internal static (float Start, float Sweep) Arc(PanelGaugeStyle style) => style switch
     {
         PanelGaugeStyle.Semicircle => (180, 180),
         PanelGaugeStyle.Circle => (-90, 360),
@@ -311,33 +342,53 @@ sealed class PanelRenderer : IDisposable
     }
 
     /// <summary>A bar's track (<paramref name="fraction"/> 1) or its filled part.</summary>
-    static void DrawBar(Graphics g, PanelTile tile, Rectangle bar, float fraction, Color color, float scale)
+    static void DrawBar(Graphics g, PanelTile tile, Rectangle bar, float fraction, Color color, float scale, bool gradient = false)
     {
-        bool vertical = tile.BarDirection == PanelBarDirection.Vertical;
         if (tile.BarStyle == PanelBarStyle.Segmented)
         {
-            int length = vertical ? bar.Height : bar.Width;
-            int thickness = vertical ? bar.Width : bar.Height;
-            int gap = Math.Max(1, (int)Math.Round(2 * scale));
-            int count = Math.Clamp(length / Math.Max(4, thickness + gap), 4, 40);
-            float pitch = (length + gap) / (float)count;
-            int lit = (int)Math.Round(fraction * count);
             using var brush = new SolidBrush(color);
-            for (int k = 0; k < lit; k++)
-            {
-                float a = k * pitch, b = a + pitch - gap;
-                var block = vertical
-                    ? RectangleF.FromLTRB(bar.Left, bar.Bottom - b, bar.Right, bar.Bottom - a)
-                    : RectangleF.FromLTRB(bar.Left + a, bar.Top, bar.Left + b, bar.Bottom);
-                g.FillRectangle(brush, block);
-            }
+            foreach (var block in BarSegments(tile, bar, fraction, scale)) g.FillRectangle(brush, block);
             return;
         }
-        var fillRect = vertical
-            ? Rectangle.FromLTRB(bar.Left, bar.Bottom - Math.Max(bar.Width, (int)(bar.Height * fraction)), bar.Right, bar.Bottom)
-            : bar with { Width = Math.Max(bar.Height, (int)(bar.Width * fraction)) };
-        Gfx.FillRounded(g, fillRect, Math.Min(bar.Width, bar.Height) / 2, color);
+        var fillRect = BarFill(tile, bar, fraction);
+        if (!gradient)
+        {
+            Gfx.FillRounded(g, fillRect, Math.Min(bar.Width, bar.Height) / 2, color);
+            return;
+        }
+        // Dim at the empty end, full colour at the reading, along the whole bar so the shade marks the level.
+        bool vertical = tile.BarDirection == PanelBarDirection.Vertical;
+        // Vertical gradients run top to bottom: bright at the top, dim at the bottom.
+        using var shade = vertical
+            ? new LinearGradientBrush(Rectangle.Inflate(bar, 1, 1), color, PanelColor.FillStart(color), LinearGradientMode.Vertical)
+            : new LinearGradientBrush(Rectangle.Inflate(bar, 1, 1), PanelColor.FillStart(color), color, LinearGradientMode.Horizontal);
+        using var path = Gfx.RoundedPath(fillRect, Math.Min(bar.Width, bar.Height) / 2);
+        g.FillPath(shade, path);
     }
+
+    /// <summary>The blocks of a segmented bar that are lit at <paramref name="fraction"/>.</summary>
+    internal static IEnumerable<RectangleF> BarSegments(PanelTile tile, Rectangle bar, float fraction, float scale)
+    {
+        bool vertical = tile.BarDirection == PanelBarDirection.Vertical;
+        int length = vertical ? bar.Height : bar.Width;
+        int thickness = vertical ? bar.Width : bar.Height;
+        int gap = Math.Max(1, (int)Math.Round(2 * scale));
+        int count = Math.Clamp(length / Math.Max(4, thickness + gap), 4, 40);
+        float pitch = (length + gap) / (float)count;
+        int lit = (int)Math.Round(fraction * count);
+        for (int k = 0; k < lit; k++)
+        {
+            float a = k * pitch, b = a + pitch - gap;
+            yield return vertical
+                ? RectangleF.FromLTRB(bar.Left, bar.Bottom - b, bar.Right, bar.Bottom - a)
+                : RectangleF.FromLTRB(bar.Left + a, bar.Top, bar.Left + b, bar.Bottom);
+        }
+    }
+
+    /// <summary>The filled part of a solid bar (never shorter than it is thick, so the rounded end stays round).</summary>
+    internal static Rectangle BarFill(PanelTile tile, Rectangle bar, float fraction) => tile.BarDirection == PanelBarDirection.Vertical
+        ? Rectangle.FromLTRB(bar.Left, bar.Bottom - Math.Max(bar.Width, (int)(bar.Height * fraction)), bar.Right, bar.Bottom)
+        : bar with { Width = Math.Max(bar.Height, (int)(bar.Width * fraction)) };
 
     void DrawDynamic(Graphics g, Frame frame, float scale, Point origin)
     {
@@ -363,7 +414,7 @@ sealed class PanelRenderer : IDisposable
             if (m.Graph is { } gr && st.Graph is { Length: > 1 } values)
                 Gfx.Sparkline(g, gr, values, st.GraphMax, st.Accent, Math.Max(1.2f, 1.5f * scale), slots: GraphSlots(tile));
             if (m.Bar is { } bar && st.Fraction is { } f && f > 0)
-                DrawBar(g, tile, bar, f, st.Accent, scale);
+                DrawBar(g, tile, bar, f, st.Accent, scale, style.GradientFills);
             if (m.Ring is { } ring && st.Fraction is { } rf && rf > 0.002f)
                 DrawGauge(g, tile.GaugeStyle, ring, m.RingWidth, rf, st.Accent);
             if (m.Number is { } nr)
@@ -372,10 +423,10 @@ sealed class PanelRenderer : IDisposable
     }
 
     /// <summary>Where each part of a value tile goes.</summary>
-    record struct TileMetrics(Rectangle? Label, float LabelPx, Rectangle? Number, float NumberPx, StringAlignment NumberAlign,
-                              Rectangle? Bar, Rectangle? Ring, float RingWidth, Rectangle? Graph);
+    internal record struct TileMetrics(Rectangle? Label, float LabelPx, Rectangle? Number, float NumberPx, StringAlignment NumberAlign,
+                                       Rectangle? Bar, Rectangle? Ring, float RingWidth, Rectangle? Graph);
 
-    TileMetrics Measure(PanelTile tile, Rectangle r, float s, string label)
+    internal static TileMetrics Measure(PanelTile tile, Rectangle r, float s, string label)
     {
         float fs = Math.Clamp(tile.FontSize, 50, 250) / 100f;
         var v = tile.Visuals;

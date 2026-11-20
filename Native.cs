@@ -491,6 +491,9 @@ static class Native
     public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
     [DllImport("user32.dll")]
+    public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint colorKey, byte alpha, uint flags);
+
+    [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hwnd);
 
     [DllImport("user32.dll", SetLastError = true)]

@@ -233,19 +233,92 @@ public sealed class PanelTests : IDisposable
     }
 
     [Theory]
-    [InlineData(false, PanelMode.Desktop)]
-    [InlineData(true, PanelMode.AlwaysOnTop)]
-    public void Panel_window_can_be_created_and_drawn(bool locked, PanelMode mode)
+    [InlineData(false, PanelMode.Desktop, false)]
+    [InlineData(true, PanelMode.AlwaysOnTop, false)]
+    [InlineData(false, PanelMode.Desktop, true)]
+    [InlineData(true, PanelMode.AlwaysOnTop, true)]
+    public void Panel_window_can_be_created_and_drawn(bool locked, PanelMode mode, bool accelerated)
     {
         // Form's constructor reads CreateParams before the panel's own constructor has run.
         var layout = PanelPresets.Build("gauges", Snap(full: true));
         layout.Enabled = true;
         layout.Locked = locked;
         layout.Mode = mode;
+        layout.Accelerated = accelerated;
+        layout.Style.Gradient = PanelGradient.Radial;
+        layout.Style.Glow = layout.Style.GradientFills = layout.Style.AnimateBackground = true;
         using var panel = new DesktopPanel(AppSettings.CreateDefault(), layout, null);
         _ = panel.Handle;
         panel.SetSnapshot(Snap(full: true));
+        // Switching renderers remakes the window; it must keep working either way.
+        var other = layout.Clone();
+        other.Accelerated = !accelerated;
+        panel.Apply(other);
+        panel.SetSnapshot(Snap(full: true));
         panel.AllowClose = true;
+    }
+
+    [Fact]
+    public void Effects_settings_survive_a_save_and_a_clone()
+    {
+        var s = AppSettings.CreateDefault();
+        var panel = PanelPresets.Build("graphs", Snap(full: true));
+        panel.Accelerated = false;
+        panel.Style.Gradient = PanelGradient.Linear;
+        panel.Style.GradientColor = "#123456";
+        panel.Style.GradientAngle = 270;
+        panel.Style.AnimateBackground = true;
+        panel.Style.Motion = PanelMotion.Full;
+        panel.Style.FrameRate = 30;
+        panel.Style.Glow = true;
+        panel.Style.GradientFills = true;
+        s.Panels.Add(panel);
+        s.SaveTo(FilePath);
+
+        foreach (var back in new[] { AppSettings.LoadFrom(FilePath).Panels.Single(), panel.Clone() })
+        {
+            Assert.False(back.Accelerated);
+            Assert.Equal(PanelGradient.Linear, back.Style.Gradient);
+            Assert.Equal("#123456", back.Style.GradientColor);
+            Assert.Equal(270, back.Style.GradientAngle);
+            Assert.True(back.Style.AnimateBackground);
+            Assert.Equal(PanelMotion.Full, back.Style.Motion);
+            Assert.Equal(30, back.Style.FrameRate);
+            Assert.True(back.Style.Glow);
+            Assert.True(back.Style.GradientFills);
+        }
+
+        // Older settings files have none of this: GPU drawing with smooth motion, no extra effects.
+        var fresh = new PanelLayout();
+        Assert.True(fresh.Accelerated);
+        Assert.Equal(PanelMotion.Smooth, fresh.Style.Motion);
+        Assert.Equal(PanelGradient.None, fresh.Style.Gradient);
+        Assert.False(fresh.Style.Glow || fresh.Style.AnimateBackground || fresh.Style.GradientFills);
+    }
+
+    [Fact]
+    public void Classic_renderer_draws_the_background_gradient()
+    {
+        var layout = new PanelLayout { Columns = 4, Rows = 1, CellWidth = 60, CellHeight = 40 };
+        layout.Style.BackgroundOpacity = 100;
+        layout.Style.Background = "#FF0000";
+        layout.Style.Gradient = PanelGradient.Linear;
+        layout.Style.GradientColor = "#0000FF";
+        layout.Style.GradientAngle = 0; // left to right
+        using var bmp = PanelRenderer.Render(layout, null, 1, null);
+        var left = bmp.GetPixel(12, bmp.Height / 2);
+        var right = bmp.GetPixel(bmp.Width - 12, bmp.Height / 2);
+        Assert.True(left.R > 200 && left.B < 60, $"left {left}");
+        Assert.True(right.B > 200 && right.R < 60, $"right {right}");
+    }
+
+    [Fact]
+    public void Colours_mix_and_gradient_fills_start_dimmer()
+    {
+        Assert.Equal(Color.FromArgb(255, 128, 0, 128).ToArgb(), PanelColor.Mix(Color.FromArgb(255, 255, 0, 0), Color.FromArgb(255, 0, 0, 255), 0.5f).ToArgb());
+        Assert.Equal(Color.Red.ToArgb(), PanelColor.Mix(Color.Red, Color.Blue, -1).ToArgb());
+        var start = PanelColor.FillStart(Color.FromArgb(255, 200, 100, 50));
+        Assert.True(start.R < 200 && start.G < 100 && start.A == 255);
     }
 
     [Fact]
