@@ -58,6 +58,10 @@ for a dashboard of every sensor in your machine.
   theme. Temperatures turn amber and red when hot.
 - **Background gradients**: linear (in any of eight directions) or radial, from the background colour to a second
   colour of your choice.
+- **Background picture** from Settings → Desktop panel → Background (or the layout editor), filled, fitted,
+  stretched, tiled or centred.
+- **Tile backgrounds**: solid, **see-through** (the background colour, gradient or picture shows through the
+  cards behind the readings) or off. Choosing a picture switches solid cards to see-through.
 - **Motion and effects** (Settings → Desktop panel → Motion and effects), drawn by the graphics card:
   - **Smooth** motion: numbers count, and bars, gauges and colours glide to each new reading.
   - **Full** motion: graphs also scroll continuously instead of stepping once per reading.
@@ -103,7 +107,7 @@ Sidebar navigation and setting cards, with a live preview of the taskbar strip a
 
 - **Search** (Ctrl+F): type in the box under the app name to find any setting by its name, description, section
   or choices, including common other words ("animation" finds Motion, "color" finds colours, "fps" finds Frame
-  rate). **Show** (or Enter for the first result) opens its page and outlines it.
+  rate, "wallpaper" or "image" finds Background picture). **Show** (or Enter for the first result) opens its page and outlines it.
 
 | Taskbar | Appearance |
 |---|---|

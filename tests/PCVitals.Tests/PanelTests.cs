@@ -272,6 +272,7 @@ public sealed class PanelTests : IDisposable
         panel.Style.FrameRate = 30;
         panel.Style.Glow = true;
         panel.Style.GradientFills = true;
+        panel.Style.TileOpacity = 45;
         s.Panels.Add(panel);
         s.SaveTo(FilePath);
 
@@ -286,6 +287,7 @@ public sealed class PanelTests : IDisposable
             Assert.Equal(30, back.Style.FrameRate);
             Assert.True(back.Style.Glow);
             Assert.True(back.Style.GradientFills);
+            Assert.Equal(45, back.Style.TileOpacity);
         }
 
         // Older settings files have none of this: GPU drawing with smooth motion, no extra effects.
@@ -310,6 +312,27 @@ public sealed class PanelTests : IDisposable
         var right = bmp.GetPixel(bmp.Width - 12, bmp.Height / 2);
         Assert.True(left.R > 200 && left.B < 60, $"left {left}");
         Assert.True(right.B > 200 && right.R < 60, $"right {right}");
+    }
+
+    [Fact]
+    public void See_through_tiles_let_the_background_show()
+    {
+        // A red background under blue tile cards: solid cards are blue, see-through ones mix in the red.
+        Color TileCentre(int opacity)
+        {
+            var layout = new PanelLayout { Columns = 1, Rows = 1, CellWidth = 80, CellHeight = 60 };
+            layout.Tiles.Add(new PanelTile { Kind = PanelTileKind.Text, Text = "" });
+            layout.Style.BackgroundOpacity = 100;
+            layout.Style.Background = "#FF0000";
+            layout.Style.TileBackground = "#0000FF";
+            layout.Style.TileOpacity = opacity;
+            using var bmp = PanelRenderer.Render(layout, null, 1, null);
+            return bmp.GetPixel(bmp.Width / 2, bmp.Height / 2);
+        }
+        var solid = TileCentre(100);
+        var glass = TileCentre(45);
+        Assert.True(solid.B > 200 && solid.R < 30, $"solid {solid}");
+        Assert.True(glass.R > 100 && glass.B > 80, $"see-through {glass}");
     }
 
     [Fact]

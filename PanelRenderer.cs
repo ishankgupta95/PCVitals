@@ -257,7 +257,7 @@ sealed class PanelRenderer : IDisposable
         var labelColor = PanelColor.Parse(style.LabelColor) ?? Theme.TextDim;
         var tileBg = PanelColor.Parse(style.TileBackground) ?? Theme.Surface;
         // Tiles keep a little body even on a see-through panel, so they stay readable over wallpaper.
-        int tileAlpha = alpha == 0 ? 0 : Math.Min(255, alpha + 20);
+        int tileAlpha = alpha == 0 ? 0 : Math.Min(255, alpha + 20) * Math.Clamp(style.TileOpacity, 0, 100) / 100;
         for (int i = 0; i < _layout.Tiles.Count; i++)
         {
             var tile = _layout.Tiles[i];

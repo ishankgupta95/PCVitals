@@ -144,7 +144,9 @@ sealed class SettingsForm : Form
         ["gpu"] = new[] { "graphics" }, ["monitor"] = new[] { "display" }, ["screen"] = new[] { "display" },
         ["transparent"] = new[] { "see-through", "opacity" }, ["transparency"] = new[] { "see-through", "opacity" }, ["opacity"] = new[] { "see-through" },
         ["widget"] = new[] { "taskbar", "panel" }, ["overlay"] = new[] { "panel", "on top" }, ["case"] = new[] { "fill the display", "panel" },
-        ["font"] = new[] { "text" }, ["size"] = new[] { "small", "large" }, ["glow"] = new[] { "glow" }, ["gradient"] = new[] { "gradient", "shaded" },
+        ["image"] = new[] { "picture" }, ["images"] = new[] { "picture" }, ["photo"] = new[] { "picture" }, ["wallpaper"] = new[] { "picture", "background" },
+        ["glass"] = new[] { "see-through" }, ["blur"] = new[] { "see-through" }, ["card"] = new[] { "tile" },
+                ["font"] = new[] { "text" }, ["size"] = new[] { "small", "large" }, ["glow"] = new[] { "glow" }, ["gradient"] = new[] { "gradient", "shaded" },
     };
 
     void RunSearch()
@@ -744,8 +746,8 @@ sealed class SettingsForm : Form
                                 Combo(new[] { "Small", "Medium", "Large", "Extra large", "Huge" }, Math.Max(0, Array.IndexOf(sizes, current.Scale)), 160,
                                       i => EditedPanel.Scale = sizes[i]), ""));
 
-        p.Controls.Add(Section("Colours"));
-        p.Controls.Add(Hint("Automatic colours follow the app theme (Appearance). Choosing a layout keeps the colours you set here only until you pick another layout."));
+        p.Controls.Add(Section("Background"));
+        p.Controls.Add(Hint("Automatic colours follow the app theme (Appearance). Choosing a layout keeps what you set here only until you pick another layout."));
         var opacities = new[] { 100, 88, 75, 50, 25, 0 };
         var opacity = Combo(new[] { "Solid", "Slightly see-through", "See-through", "Half", "Faint", "None" },
                             Math.Max(0, Array.IndexOf(opacities, current.Style.BackgroundOpacity)), 190, i => EditedPanel.Style.BackgroundOpacity = opacities[i]);
@@ -759,7 +761,20 @@ sealed class SettingsForm : Form
         var directions = new[] { "Left to right", "Down to the right", "Top to bottom", "Down to the left", "Right to left", "Up to the left", "Bottom to top", "Up to the right" };
         p.Controls.Add(new Card("Gradient direction", "For linear gradients.",
                                 Combo(directions, Math.Max(0, Array.IndexOf(angles, current.Style.GradientAngle)), 190, i => EditedPanel.Style.GradientAngle = angles[i]), ""));
-        p.Controls.Add(new Card("Tile backgrounds", "A card behind each reading.", Toggle(current.Style.TileBackgrounds, v => EditedPanel.Style.TileBackgrounds = v), ""));
+        p.Controls.Add(new Card("Background picture", current.Style.BackgroundImage == null
+                                    ? "A picture behind the readings (PNG, JPG, BMP or GIF). The background colour tints it if it has see-through parts."
+                                    : "Shown behind the readings. Fit decides how it covers the panel.",
+                                PictureSetting(current), ""));
+        // Solid cards hide whatever is behind them; see-through lets a gradient or picture show around the numbers.
+        int tileMode = !current.Style.TileBackgrounds ? 2 : current.Style.TileOpacity < 100 ? 1 : 0;
+        p.Controls.Add(new Card("Tile backgrounds", "A card behind each reading. See-through lets the background colour, gradient or picture show through.",
+                                Combo(new[] { "Solid", "See-through", "Off" }, tileMode, 160, i =>
+                                {
+                                    EditedPanel.Style.TileBackgrounds = i != 2;
+                                    EditedPanel.Style.TileOpacity = i == 1 ? SeeThroughTiles : 100;
+                                }), ""));
+
+        p.Controls.Add(Section("Colours"));
         p.Controls.Add(new Card("Labels", null, ColorSetting(current.Style.LabelColor, () => Theme.TextDim, c => EditedPanel.Style.LabelColor = c), ""));
         p.Controls.Add(new Card("Numbers", "Temperatures still turn amber and red when hot.", ColorSetting(current.Style.ValueColor, () => Theme.Text, c => EditedPanel.Style.ValueColor = c), ""));
         p.Controls.Add(new Card("Bars, rings and graphs", "Automatic uses each device's colour (CPU blue, GPU green, memory purple…).",
@@ -770,10 +785,11 @@ sealed class SettingsForm : Form
             style.Background = style.LabelColor = style.ValueColor = style.AccentColor = style.TileBackground = style.GradientColor = null;
             style.BackgroundOpacity = new PanelStyle().BackgroundOpacity;
             style.TileBackgrounds = true;
+            style.TileOpacity = 100;
             style.Gradient = PanelGradient.None;
             Changed();
             PanelChanged();
-        }) { Margin = new Padding(0, 8, 0, 8) });
+        }) { Margin = new Padding(0, 8, 0, 8), AccessibleName = "Reset background and colours" });
 
         p.Controls.Add(Section("Motion and effects"));
         p.Controls.Add(Hint("Drawn by your graphics card. A still panel draws nothing between readings; animations only run while something moves."));
@@ -793,6 +809,42 @@ sealed class SettingsForm : Form
                                 Toggle(current.Style.Glow, v => EditedPanel.Style.Glow = v), ""));
         p.Controls.Add(new Card("Shaded bars and gauges", "Bars and gauges shade from dim at the empty end to full colour at the reading.",
                                 Toggle(current.Style.GradientFills, v => EditedPanel.Style.GradientFills = v), ""));
+    }
+
+    /// <summary>Tile card opacity for "See-through" (percent of the solid card).</summary>
+    const int SeeThroughTiles = 45;
+
+    static readonly string[] PictureFits = { "Fill (crop)", "Fit (show all)", "Stretch", "Tile", "Centre" };
+
+    /// <summary>Choose / Remove for the panel's background picture, and how it fits.</summary>
+    AccessoryRow PictureSetting(PanelLayout current)
+    {
+        var choose = new PillButton(current.Style.BackgroundImage == null ? "Choose picture…" : "Change…", () =>
+        {
+            using var dialog = new OpenFileDialog { Filter = PanelImages.FileFilter, Title = "Choose a background picture" };
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            if (PanelImages.Import(dialog.FileName) is not { } name)
+            {
+                MessageBox.Show(this, "That file couldn't be read as a picture.", "PC Vitals", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            var style = EditedPanel.Style;
+            style.BackgroundImage = name;
+            // Solid tile cards would cover most of it.
+            if (style.TileBackgrounds && style.TileOpacity >= 100) style.TileOpacity = SeeThroughTiles;
+            Changed();
+            PanelChanged();
+        }) { AccessibleName = "Choose a background picture" };
+        if (current.Style.BackgroundImage == null) return new AccessoryRow(choose);
+        var fit = Combo(PictureFits, (int)current.Style.BackgroundFit, 150, i => EditedPanel.Style.BackgroundFit = (PanelImageFit)i);
+        fit.AccessibleName = "Picture fit";
+        var remove = new PillButton("Remove", () =>
+        {
+            EditedPanel.Style.BackgroundImage = null;
+            Changed();
+            PanelChanged();
+        }) { AccessibleName = "Remove the background picture" };
+        return new AccessoryRow(fit, choose, remove);
     }
 
     /// <summary>A colour picker with a button that goes back to the automatic colour.</summary>

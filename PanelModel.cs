@@ -88,6 +88,8 @@ public sealed class PanelStyle
     /// <summary>Each tile's own backdrop; null for the theme's card colour.</summary>
     public string? TileBackground { get; set; }
     public bool TileBackgrounds { get; set; } = true;
+    /// <summary>How solid the tile cards are, in percent: 100 solid, lower lets the background (gradient, picture) show through.</summary>
+    public int TileOpacity { get; set; } = 100;
     public int CornerRadius { get; set; } = 10;
     public string FontFamily { get; set; } = "Segoe UI";
     /// <summary>A picture behind the tiles: file name in the panels folder (<see cref="PanelImages"/>).</summary>
