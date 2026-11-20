@@ -86,10 +86,182 @@ sealed class SettingsForm : Form
         AddPage("general", "General", "", BuildGeneral);
         AddPage("about", "About", "", BuildAbout);
 
+        _results = NewPage("Search results");
+        _results.Resize += (_, _) => Stretch(_results);
+        _content.Controls.Add(_results);
+        _nav.Search.TextChanged += (_, _) => RunSearch();
+        _nav.Search.FieldKeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Enter && _hits.Count > 0)
+            {
+                e.SuppressKeyPress = true;
+                GoTo(_hits[0]);
+            }
+            else if (e.KeyCode == Keys.Escape && _nav.Search.Value.Length > 0)
+            {
+                e.SuppressKeyPress = true;
+                _nav.Search.Value = "";
+            }
+        };
+
         _nav.SelectionChanged += ShowPageInternal;
         _nav.Select(page != null && _pages.ContainsKey(page) ? page : "taskbar");
         ResumeLayout(false);
         PerformLayout();
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData is (Keys.Control | Keys.F) or (Keys.Control | Keys.E))
+        {
+            _nav.Search.FocusText();
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    // ---- Search -----------------------------------------------------------------------------
+
+    readonly FlowLayoutPanel _results;
+    readonly List<SearchHit> _hits = new();
+    string _beforeSearch = "taskbar";
+
+    /// <summary>A setting found by search: its card, and where it lives.</summary>
+    internal sealed record SearchHit(string Page, string PageTitle, string Section, Card Card, int Score);
+
+    /// <summary>Words people search for that the settings call something else.</summary>
+    static readonly Dictionary<string, string[]> Synonyms = new()
+    {
+        ["color"] = new[] { "colour" }, ["colors"] = new[] { "colour" }, ["gray"] = new[] { "grey" },
+        ["animation"] = new[] { "motion", "moving", "glide", "fps", "frame rate" }, ["animate"] = new[] { "motion", "moving" },
+        ["animations"] = new[] { "motion", "moving", "glide" }, ["fps"] = new[] { "frame rate" }, ["framerate"] = new[] { "frame rate" },
+        ["speed"] = new[] { "refresh", "frame rate", "interval" }, ["refresh"] = new[] { "interval", "every" },
+        ["startup"] = new[] { "start with windows" }, ["boot"] = new[] { "start with windows" }, ["autostart"] = new[] { "start with windows" },
+        ["dark"] = new[] { "theme" }, ["light"] = new[] { "theme" }, ["theme"] = new[] { "appearance" },
+        ["temp"] = new[] { "temperature" }, ["celsius"] = new[] { "temperature unit", "°c" }, ["fahrenheit"] = new[] { "temperature unit", "°f" },
+        ["notification"] = new[] { "alert" }, ["notify"] = new[] { "alert" }, ["warning"] = new[] { "alert" },
+        ["hotkey"] = new[] { "shortcut" }, ["key"] = new[] { "shortcut" },
+        ["gpu"] = new[] { "graphics" }, ["monitor"] = new[] { "display" }, ["screen"] = new[] { "display" },
+        ["transparent"] = new[] { "see-through", "opacity" }, ["transparency"] = new[] { "see-through", "opacity" }, ["opacity"] = new[] { "see-through" },
+        ["widget"] = new[] { "taskbar", "panel" }, ["overlay"] = new[] { "panel", "on top" }, ["case"] = new[] { "fill the display", "panel" },
+        ["font"] = new[] { "text" }, ["size"] = new[] { "small", "large" }, ["glow"] = new[] { "glow" }, ["gradient"] = new[] { "gradient", "shaded" },
+    };
+
+    void RunSearch()
+    {
+        if (_clearingSearch) return;
+        var query = _nav.Search.Value.Trim();
+        if (query.Length == 0)
+        {
+            // Back to the page that was open before searching.
+            _results.Visible = false;
+            _nav.Select(_beforeSearch);
+            ShowPageInternal(_beforeSearch);
+            return;
+        }
+        if (_nav.Selected.Length > 0) _beforeSearch = _nav.Selected;
+        _hits.Clear();
+        _hits.AddRange(Search(query));
+
+        _results.SuspendLayout();
+        while (_results.Controls.Count > 1)
+        {
+            var old = _results.Controls[^1];
+            _results.Controls.Remove(old);
+            old.Dispose();
+        }
+        _results.Controls.Add(Hint(_hits.Count == 0
+            ? $"No settings match “{query}”. Try other words, such as colour, startup, alerts or graphs."
+            : $"{_hits.Count} setting{(_hits.Count == 1 ? "" : "s")} match “{query}”. Press Enter to go to the first."));
+        foreach (var hit in _hits.Take(40))
+        {
+            var where = hit.Section.Length > 0 ? $"{hit.PageTitle} › {hit.Section}" : hit.PageTitle;
+            var desc = hit.Card.Description is { } d ? $"{where}  ·  {d}" : where;
+            var go = new PillButton("Show", () => GoTo(hit)) { AccessibleName = $"Show {hit.Card.Title} in {hit.PageTitle}" };
+            _results.Controls.Add(new Card(hit.Card.Title, desc, go, ""));
+        }
+        _results.ResumeLayout();
+
+        foreach (var p in _pages.Values) p.Visible = false;
+        _nav.ClearSelection();
+        _results.Visible = true;
+        _results.AutoScrollPosition = Point.Empty;
+        Stretch(_results);
+    }
+
+    /// <summary>Every setting card whose words (title, description, section, page and choices) contain all the query's words.</summary>
+    internal IEnumerable<SearchHit> Search(string query)
+    {
+        var words = query.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var hits = new List<SearchHit>();
+        foreach (var (key, page) in _pages)
+        {
+            var pageTitle = _nav.TitleOf(key);
+            string section = "";
+            Collect(page.Controls, key, pageTitle, ref section, words, hits);
+        }
+        // Title matches first, then by page order.
+        return hits.OrderByDescending(h => h.Score);
+    }
+
+    static void Collect(Control.ControlCollection controls, string key, string pageTitle, ref string section, string[] words, List<SearchHit> hits)
+    {
+        foreach (Control c in controls)
+        {
+            switch (c)
+            {
+                case Label label when label.Font.Size is > 10 and < 13:
+                    section = label.Text; // a Section() heading
+                    break;
+                case Card card:
+                {
+                    var title = card.Title.ToLowerInvariant();
+                    var all = string.Join(' ', new[] { title, card.Description ?? "", section, pageTitle }.Concat(Choices(card))).ToLowerInvariant();
+                    if (!words.All(w => Matches(all, w))) break;
+                    var heading = section.ToLowerInvariant();
+                    int score = words.Count(w => Matches(title, w)) * 10 + (words.Any(w => Matches(heading, w)) ? 2 : 0);
+                    hits.Add(new SearchHit(key, pageTitle, section, card, score));
+                    break;
+                }
+                case FlowLayoutPanel list when c is not AccessoryRow:
+                    Collect(list.Controls, key, pageTitle, ref section, words, hits); // cards inside lists (taskbar items)
+                    break;
+            }
+        }
+    }
+
+    /// <summary>The text of a card's dropdown choices and buttons, so "60 fps" or "Radial" find their setting.</summary>
+    static IEnumerable<string> Choices(Control c)
+    {
+        foreach (Control child in c.Controls)
+        {
+            if (child is Dropdown d) foreach (var item in d.Items) yield return item;
+            else if (child is PillButton b) yield return b.Text;
+            foreach (var s in Choices(child)) yield return s;
+        }
+    }
+
+    static bool Matches(string text, string word)
+    {
+        if (text.Contains(word)) return true;
+        if (Synonyms.TryGetValue(word, out var alt) && alt.Any(text.Contains)) return true;
+        // "alerts" finds "alert", "gradients" finds "gradient".
+        return word.Length > 3 && word.EndsWith('s') && text.Contains(word[..^1]);
+    }
+
+    void GoTo(SearchHit hit)
+    {
+        _beforeSearch = hit.Page;
+        _nav.Search.Value = ""; // shows that page again (RunSearch)
+        _nav.Select(hit.Page);
+        ShowPageInternal(hit.Page);
+        if (hit.Card.IsDisposed) return;
+        // Bring it near the top of the page (with its section heading still in view), not just onto the bottom edge.
+        var page = _pages[hit.Page];
+        page.PerformLayout();
+        int top = page.PointToClient(hit.Card.Parent!.PointToScreen(hit.Card.Location)).Y - page.AutoScrollPosition.Y;
+        page.AutoScrollPosition = new Point(0, Math.Max(0, top - Ui.S(page, 90)));
+        hit.Card.Flash();
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -97,6 +269,7 @@ sealed class SettingsForm : Form
         base.OnHandleCreated(e);
         Native.ApplyRoundedDarkFrame(Handle);
         foreach (var p in _pages.Values) ApplyScrollbarTheme(p);
+        ApplyScrollbarTheme(_results);
     }
 
     /// <summary>
@@ -115,6 +288,7 @@ sealed class SettingsForm : Form
             Native.ApplyRoundedDarkFrame(Handle);
             Native.RefreshFrame(Handle);
             foreach (var p in _pages.Values) ApplyScrollbarTheme(p);
+            ApplyScrollbarTheme(_results);
         }
         Invalidate(invalidateChildren: true);
     }
@@ -158,6 +332,15 @@ sealed class SettingsForm : Form
     void AddPage(string key, string title, string glyph, Action<FlowLayoutPanel> build)
     {
         _nav.Add(key, title, glyph);
+        var page = NewPage(title);
+        build(page);
+        page.Resize += (_, _) => Stretch(page);
+        _pages[key] = page;
+        _content.Controls.Add(page);
+    }
+
+    static SettingsPage NewPage(string title)
+    {
         var page = new SettingsPage
         {
             Dock = DockStyle.Fill,
@@ -176,10 +359,7 @@ sealed class SettingsForm : Form
             ForeColor = Theme.Text,
             Margin = new Padding(0, 0, 0, 18),
         });
-        build(page);
-        page.Resize += (_, _) => Stretch(page);
-        _pages[key] = page;
-        _content.Controls.Add(page);
+        return page;
     }
 
     /// <summary>
@@ -212,9 +392,20 @@ sealed class SettingsForm : Form
 
     void ShowPageInternal(string key)
     {
+        if (!_pages.ContainsKey(key)) return;
+        // Picking a page in the sidebar ends a search.
+        _results.Visible = false;
+        if (_nav.Search.Value.Length > 0)
+        {
+            _clearingSearch = true;
+            _nav.Search.Value = "";
+            _clearingSearch = false;
+        }
         foreach (var (k, p) in _pages) p.Visible = k == key;
         Stretch(_pages[key]);
     }
+
+    bool _clearingSearch;
 
     /// <summary>FlowLayoutPanel doesn't stretch children; size full-width cards to the page.</summary>
     static void Stretch(FlowLayoutPanel page)
@@ -561,13 +752,13 @@ sealed class SettingsForm : Form
         p.Controls.Add(new Card("Background", null, new AccessoryRow(opacity, ColorSetting(current.Style.Background, () => Theme.Bg, c => EditedPanel.Style.Background = c)), ""));
         var angles = new[] { 0, 45, 90, 135, 180, 225, 270, 315 };
         var gradient = Combo(new[] { "None", "Linear", "Radial" }, (int)current.Style.Gradient, 120, i => EditedPanel.Style.Gradient = (PanelGradient)i);
-        var angle = Combo(new[] { "→", "↘", "↓", "↙", "←", "↖", "↑", "↗" }, Math.Max(0, Array.IndexOf(angles, current.Style.GradientAngle)), 70,
-                          i => EditedPanel.Style.GradientAngle = angles[i]);
-        angle.AccessibleName = "Gradient direction";
-        p.Controls.Add(new Card("Background gradient", "Shades the background from its colour to a second one. Direction applies to linear gradients.",
-                                new AccessoryRow(gradient, angle, ColorSetting(current.Style.GradientColor,
+        p.Controls.Add(new Card("Background gradient", "Shades the background from its colour to this one.",
+                                new AccessoryRow(gradient, ColorSetting(current.Style.GradientColor,
                                     () => PanelColor.GradientEnd(new PanelStyle(), PanelColor.Parse(current.Style.Background) ?? Theme.Bg),
                                     c => EditedPanel.Style.GradientColor = c)), ""));
+        var directions = new[] { "Left to right", "Down to the right", "Top to bottom", "Down to the left", "Right to left", "Up to the left", "Bottom to top", "Up to the right" };
+        p.Controls.Add(new Card("Gradient direction", "For linear gradients.",
+                                Combo(directions, Math.Max(0, Array.IndexOf(angles, current.Style.GradientAngle)), 190, i => EditedPanel.Style.GradientAngle = angles[i]), ""));
         p.Controls.Add(new Card("Tile backgrounds", "A card behind each reading.", Toggle(current.Style.TileBackgrounds, v => EditedPanel.Style.TileBackgrounds = v), ""));
         p.Controls.Add(new Card("Labels", null, ColorSetting(current.Style.LabelColor, () => Theme.TextDim, c => EditedPanel.Style.LabelColor = c), ""));
         p.Controls.Add(new Card("Numbers", "Temperatures still turn amber and red when hot.", ColorSetting(current.Style.ValueColor, () => Theme.Text, c => EditedPanel.Style.ValueColor = c), ""));

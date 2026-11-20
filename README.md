@@ -101,6 +101,10 @@ for a dashboard of every sensor in your machine.
 ### Settings
 Sidebar navigation and setting cards, with a live preview of the taskbar strip as you edit.
 
+- **Search** (Ctrl+F): type in the box under the app name to find any setting by its name, description, section
+  or choices, including common other words ("animation" finds Motion, "color" finds colours, "fps" finds Frame
+  rate). **Show** (or Enter for the first result) opens its page and outlines it.
+
 | Taskbar | Appearance |
 |---|---|
 | ![Taskbar settings](docs/settings-taskbar.png) | ![Appearance settings](docs/settings-appearance.png) |

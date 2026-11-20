@@ -200,6 +200,42 @@ sealed class Card : Control
         if (_description != null)
             TextRenderer.DrawText(g, _description, f.Small, new Rectangle(TextLeft, y + Ui.S(this, 23), textW, descH + 2), Theme.TextDim,
                                   TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
+        if (_flash)
+        {
+            // "Here it is": an accent outline after a search jumps to this setting.
+            using var path = Gfx.RoundedPath(new Rectangle(1, 1, Width - 3, Height - 3), Ui.S(this, 8));
+            using var pen = new Pen(Theme.Cpu, Math.Max(2f, Ui.S(this, 2f)));
+            g.DrawPath(pen, path);
+        }
+    }
+
+    public string Title => _title;
+    public string? Description => _description;
+
+    bool _flash;
+    System.Windows.Forms.Timer? _flashTimer;
+
+    /// <summary>Outlines the card for a moment, to show where a search result is.</summary>
+    public void Flash()
+    {
+        _flash = true;
+        Invalidate();
+        _flashTimer?.Dispose();
+        _flashTimer = new System.Windows.Forms.Timer { Interval = 1800 };
+        _flashTimer.Tick += (_, _) =>
+        {
+            _flashTimer?.Dispose();
+            _flashTimer = null;
+            _flash = false;
+            Invalidate();
+        };
+        _flashTimer.Start();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _flashTimer?.Dispose();
+        base.Dispose(disposing);
     }
 }
 
@@ -212,6 +248,9 @@ sealed class Dropdown : Control
     readonly string[] _items;
     int _selected;
     bool _hover;
+
+    /// <summary>The choices, for settings search.</summary>
+    public IReadOnlyList<string> Items => _items;
 
     public event EventHandler? SelectedIndexChanged;
 
@@ -468,6 +507,9 @@ sealed class NavList : Control
     public string Selected { get; private set; } = "";
     public event Action<string>? SelectionChanged;
 
+    /// <summary>The settings search field, under the app name.</summary>
+    public InputBox Search { get; } = new("", "Search settings  (Ctrl+F)", 200, 80) { FieldName = "Search settings" };
+
     public NavList()
     {
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint |
@@ -476,6 +518,8 @@ sealed class NavList : Control
         Cursor = Cursors.Hand;
         TabStop = true;
         AccessibleName = "Settings pages";
+        Search.Cursor = Cursors.IBeam;
+        Controls.Add(Search);
     }
 
     // Keyboard: Up/Down (or Home/End) move between pages while the sidebar has focus.
@@ -540,7 +584,22 @@ sealed class NavList : Control
         SelectionChanged?.Invoke(key);
     }
 
-    int ItemTop(int i) => Ui.S(this, 96) + i * Ui.S(this, 40);
+    /// <summary>No page highlighted (search results are showing).</summary>
+    public void ClearSelection()
+    {
+        Selected = "";
+        Invalidate();
+    }
+
+    public string TitleOf(string key) => _items.FirstOrDefault(x => x.Key == key).Text ?? key;
+
+    protected override void OnLayout(LayoutEventArgs e)
+    {
+        base.OnLayout(e);
+        Search.Bounds = new Rectangle(Ui.S(this, 14), Ui.S(this, 78), Width - Ui.S(this, 28), Ui.S(this, 34));
+    }
+
+    int ItemTop(int i) => Ui.S(this, 128) + i * Ui.S(this, 40);
 
     protected override void OnPaint(PaintEventArgs e)
     {
