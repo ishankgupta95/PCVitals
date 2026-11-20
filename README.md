@@ -203,6 +203,15 @@ How it stays light:
   X3D chip that meant 40+ MB of garbage between collections. A 64 MB heap hard limit (the live heap is ~3–11 MB)
   caps it at about 5 MB. Drive discovery's one-off ~40 MB of
   allocations are decommitted right after it finishes.
+- **The two slowest NVIDIA reads are trimmed** on background polls (measured on an ASUS RTX 5080):
+  - NVAPI's power topology, which the board-power estimate is made from, cost about 7–10 ms of processor time per
+    read. It is now read every 2 s (every poll while the dashboard is open), and the last value stays on screen in
+    between. The estimate's accuracy is unchanged (~0.3 W mean error).
+  - The 12VHPWR connector pin sensors (ASUS ROG Astral cards) are read over I²C only while the dashboard is open, or
+    when one of them is pinned, alerted on or on a panel. Reading them on every poll cost about 3.6 ms of processor
+    time and 4 ms of waiting.
+  - Together: the card's background update fell from ~18 ms to ~8 ms of processor time per second, and the app's
+    steady-state CPU from ~1.8 % to ~1.25 % of one core (non-admin `--bench`, 1 s refresh).
 - **Per-engine Direct3D counters** (about 20 per GPU) are only read while the dashboard is open. The headline
   GPU load comes from NVAPI/ADL.
 - **Demand-driven polling**: drive SMART data, DIMM SPD (over SMBus), the motherboard sensor chip and the

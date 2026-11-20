@@ -388,7 +388,9 @@ public sealed class HardwareService : IDisposable
                 int ticks = Math.Max(1, everyMs / Math.Max(1, IntervalMs));
                 if (_tick % ticks != 0) continue;
             }
-            UpdateDevice(hw, DetailedMode);
+            // NVIDIA power is read every 2 s on background polls (the last value stays on screen in between).
+            bool power = first || _tick % Math.Max(1, PinGate.PowerEveryMs / Math.Max(1, IntervalMs)) == 0;
+            UpdateDevice(hw, DetailedMode, connectorPins: DetailedMode || Volatile.Read(ref _tracked).Any(k => PinGate.IsPinSensor(k.SensorName)), power: power);
             if (hw.HardwareType == HardwareType.Storage) ReadDriveDetails(hw);
         }
     }
@@ -534,12 +536,64 @@ public sealed class HardwareService : IDisposable
     [DllImport("kernel32.dll")]
     static extern IntPtr GetCurrentThread();
 
-    /// <summary>Updates one device, skipping NVML's slow PCIe sampling unless the dashboard is open.</summary>
-    internal static void UpdateDevice(IHardware hw, bool detailed)
+    /// <summary>
+    /// Updates one device, skipping NVML's slow PCIe sampling unless the dashboard is open. On background polls an
+    /// NVIDIA card also skips the 12VHPWR connector pins unless <paramref name="connectorPins"/> (one is pinned,
+    /// alerted on or on a panel), and its power reading unless <paramref name="power"/> (see <see cref="PinGate"/>).
+    /// </summary>
+    internal static void UpdateDevice(IHardware hw, bool detailed, bool connectorPins = true, bool power = true)
     {
         if (detailed) hw.Update();
-        else D3DGate.Update(hw);
-        foreach (var sub in hw.SubHardware) UpdateDevice(sub, detailed);
+        else D3DGate.Update(hw, connectorPins, power);
+        foreach (var sub in hw.SubHardware) UpdateDevice(sub, detailed, connectorPins, power);
+    }
+
+    /// <summary>
+    /// Two NVIDIA reads cost most of a background poll on an RTX 50 card (measured on an ASUS RTX 5080):
+    /// <list type="bullet">
+    /// <item>ASUS ROG Astral cards report each 12VHPWR connector pin's voltage and current over I²C: ~3.6 ms of
+    /// processor time and ~4 ms of waiting, for readings only the dashboard's full sensor list shows.</item>
+    /// <item>NVAPI's power topology (the "GPU Power" percentage the board-power estimate is made from): ~7 ms of
+    /// processor time. Background polls read it every 2 s and keep the last value in between.</item>
+    /// </list>
+    /// The library reads each only when its sensor array is non-empty, so a skipped poll hides the array.
+    /// </summary>
+    internal static class PinGate
+    {
+        const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
+        static readonly Type? GpuType = typeof(Computer).Assembly.GetType("LibreHardwareMonitor.Hardware.Gpu.NvidiaGpu");
+        static readonly FieldInfo? PinsField = GpuType?.GetField("_12VHPwrPinCurrentSensors", Private);
+        static readonly FieldInfo? PowerField = GpuType?.GetField("_powers", Private);
+
+        /// <summary>How often background polls read NVIDIA power.</summary>
+        public const int PowerEveryMs = 2000;
+
+        public static bool IsPinSensor(string name) => name.StartsWith("12VHPWR", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Runs <paramref name="update"/> with the pin and/or power reads switched off, where this card has them.</summary>
+        public static void Skip(IHardware hw, bool pins, bool power, Action update)
+        {
+            if (hw.GetType() != GpuType || (pins && power))
+            {
+                update();
+                return;
+            }
+            var hidden = new List<(FieldInfo Field, object Value)>(2);
+            foreach (var (field, keep) in new[] { (PinsField, pins), (PowerField, power) })
+                if (!keep && field?.GetValue(hw) is Array { Length: > 0 } sensors)
+                {
+                    hidden.Add((field, sensors));
+                    field.SetValue(hw, null);
+                }
+            try
+            {
+                update();
+            }
+            finally
+            {
+                foreach (var (field, value) in hidden) field.SetValue(hw, value);
+            }
+        }
     }
 
     /// <summary>
@@ -552,7 +606,7 @@ public sealed class HardwareService : IDisposable
         static readonly Dictionary<Type, FieldInfo?> Fields = new();
         static readonly HashSet<Type> Broken = new();
 
-        public static void Update(IHardware hw)
+        public static void Update(IHardware hw, bool connectorPins = true, bool power = true)
         {
             var type = hw.GetType();
             if (!Fields.TryGetValue(type, out var field))
@@ -563,20 +617,20 @@ public sealed class HardwareService : IDisposable
             }
             if (field == null || Broken.Contains(type) || field.GetValue(hw) is not string id)
             {
-                Inner(hw);
+                Inner(hw, connectorPins, power);
                 return;
             }
             field.SetValue(hw, null);
             try
             {
-                Inner(hw);
+                Inner(hw, connectorPins, power);
             }
             catch (Exception ex)
             {
                 Broken.Add(type); // library changed shape; stop gating this type
                 LogOnce("d3d-broken:" + type.Name, $"D3D counter shortcut disabled for {type.Name}: {ex.Message}");
                 field.SetValue(hw, id);
-                Inner(hw);
+                Inner(hw, connectorPins, power);
                 return;
             }
             finally
@@ -585,7 +639,9 @@ public sealed class HardwareService : IDisposable
             }
         }
 
-        static void Inner(IHardware hw)
+        static void Inner(IHardware hw, bool connectorPins, bool power) => PinGate.Skip(hw, connectorPins, power, () => Plain(hw));
+
+        static void Plain(IHardware hw)
         {
             if (NvmlGate.Applies(hw)) NvmlGate.UpdateWithoutPcie(hw);
             else hw.Update();

@@ -397,7 +397,7 @@ static class Program
                 foreach (var detailed in new[] { false, true })
                 {
                     var t = Stopwatch.StartNew();
-                    HardwareService.UpdateDevice(h, detailed);
+                    HardwareService.UpdateDevice(h, detailed, connectorPins: detailed);
                     var key = $"{h.HardwareType,-12} {h.Name}{(detailed ? "  [dashboard open]" : "")}";
                     cost[key] = cost.GetValueOrDefault(key) + t.Elapsed.TotalMilliseconds;
                 }

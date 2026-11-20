@@ -5,6 +5,16 @@ namespace PCVitals.Tests;
 
 public class SensorKeyTests
 {
+    [Fact]
+    public void Connector_pin_sensors_are_recognised_by_name()
+    {
+        // Background polls skip the ASUS 12VHPWR pin read unless one of these is pinned, alerted on or on a panel.
+        Assert.True(HardwareService.PinGate.IsPinSensor("12VHPWR Pin 3"));
+        Assert.True(HardwareService.PinGate.IsPinSensor("12VHPWR Connector"));
+        Assert.False(HardwareService.PinGate.IsPinSensor("GPU Package"));
+        Assert.False(HardwareService.PinGate.IsPinSensor("GPU Power"));
+    }
+
     static SensorReading S(string id, string name, SensorType type, float value = 50) => new(id, name, type, value, null, null);
 
     static readonly HardwareReading Cpu = new("/amdcpu/0", "AMD Ryzen 7 9800X3D", HardwareType.Cpu, new[]
