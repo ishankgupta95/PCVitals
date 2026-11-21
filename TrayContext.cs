@@ -113,6 +113,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             if (++_placementTicks % 5 == 0) SyncExtraWidgets();
         };
         _placementTimer.Start();
+        _awayWatcher = new AwayWatcher(_away);
         SyncPanels();
         // Pictures from panels that were since deleted or changed.
         PanelImages.Prune(_settings.Panels);
@@ -277,7 +278,8 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         _hw.IntervalMs = _settings.IntervalMs;
         _hw.PreferredGpuId = _settings.PrimaryGpuId;
         bool Shown(WidgetKind k) => _settings.WidgetEnabled && _settings.WidgetItems.Any(i => i.Enabled && i.Kind == k);
-        var onPanels = _settings.Panels.Where(p => p.Enabled).SelectMany(p => p.Tiles).Select(PanelSources.Needs).ToList();
+        // A busy scene is usually a hidden panel, but its readings are needed while it is showing.
+        var onPanels = _settings.Panels.Where(p => p.Enabled).SelectMany(p => new[] { p, SceneSwitcher.FindScene(p, _settings.Panels) }).OfType<PanelLayout>().Distinct().SelectMany(p => p.Tiles).Select(PanelSources.Needs).ToList();
         _hw.NeedStorage = Shown(WidgetKind.Disk) || onPanels.Any(n => n.Storage);
         _hw.NeedBoard = Shown(WidgetKind.Board) || onPanels.Any(n => n.Board);
         _hw.NeedSecondGpu = Shown(WidgetKind.SecondGpu) || onPanels.Any(n => n.SecondGpu);
@@ -324,7 +326,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
             if (i == _panels.Count)
             {
                 // Its window handle is only made when it is first shown, so a hidden panel costs nothing.
-                var panel = new DesktopPanel(_settings, _settings.Panels[i], _hw.GetHistory);
+                var panel = new DesktopPanel(_settings, _settings.Panels[i], _hw.GetHistory) { Away = _away };
                 panel.TileClicked += page => ShowDashboard(null, false, page);
                 panel.MenuRequested += p =>
                 {
@@ -335,12 +337,64 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
                 panel.FormClosed += (_, _) => { if (!panel.AllowClose) Exit(); };
                 _panels.Add(panel);
             }
-            _panels[i].Apply(_settings.Panels[i]);
+            ApplyScene(i);
             if (_hw.Latest is { } snap) _panels[i].SetSnapshot(snap);
+        }
+        var ids = _settings.Panels.Select(p => p.Id).ToHashSet();
+        foreach (var gone in _switchers.Keys.Where(k => !ids.Contains(k)).ToList()) { _switchers.Remove(gone); _sceneShown.Remove(gone); }
+    }
+
+    // ---- Scenes: a panel shows another panel's layout while the PC is busy ---------------------
+
+    readonly Dictionary<string, SceneSwitcher> _switchers = new();
+    /// <summary>Per panel id: the id of the layout its window shows now (its own, or its scene's).</summary>
+    readonly Dictionary<string, string> _sceneShown = new();
+
+    /// <summary>Applies the layout panel <paramref name="i"/> should show now: its own, or its scene merged with its own window options.</summary>
+    void ApplyScene(int i)
+    {
+        var host = _settings.Panels[i];
+        var scene = _sceneShown.TryGetValue(host.Id, out var shown) && shown != host.Id ? SceneSwitcher.FindScene(host, _settings.Panels) : null;
+        if (scene != null && scene.Id == shown)
+        {
+            _panels[i].Home = host;
+            _panels[i].Apply(SceneSwitcher.Merge(host, scene));
+        }
+        else
+        {
+            _sceneShown.Remove(host.Id);
+            _panels[i].Home = null;
+            _panels[i].Apply(host);
+        }
+    }
+
+    /// <summary>Feeds the reading to each panel's switcher and re-applies a panel only when its scene changes.</summary>
+    void UpdateScenes(Snapshot snap)
+    {
+        bool? fullscreen = null;
+        for (int i = 0; i < _panels.Count && i < _settings.Panels.Count; i++)
+        {
+            var host = _settings.Panels[i];
+            if (SceneSwitcher.FindScene(host, _settings.Panels) == null)
+            {
+                // Scene turned off: forget its state, so turning it on again waits for a busy spell as usual.
+                _switchers.Remove(host.Id);
+                continue;
+            }
+            if (!_switchers.TryGetValue(host.Id, out var switcher)) _switchers[host.Id] = switcher = new SceneSwitcher();
+            if (host.SceneTrigger == SceneTrigger.Fullscreen)
+                fullscreen ??= Screen.PrimaryScreen is { } main && Native.FullscreenAppOn(main);
+            string id = switcher.Update(DateTime.UtcNow, host, _settings.Panels, snap.Summary, fullscreen ?? false);
+            if (_sceneShown.GetValueOrDefault(host.Id, host.Id) == id) continue;
+            _sceneShown[host.Id] = id;
+            ApplyScene(i);
         }
     }
 
     DesktopPanel? _panelMenuTarget;
+    /// <summary>Locked session / display off, shared by every panel so they stop drawing together.</summary>
+    readonly AwayState _away = new();
+    AwayWatcher? _awayWatcher;
 
     /// <summary>On a laptop, turn the battery item on the first time a battery shows up.</summary>
     void EnableBatteryItemOnce(Snapshot snap)
@@ -368,6 +422,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         UpdateLogoTooltip(snap.Summary);
         _widget.SetSnapshot(snap);
         foreach (var extra in _extraWidgets.Values) extra.SetSnapshot(snap);
+        UpdateScenes(snap);
         foreach (var panel in _panels) panel.SetSnapshot(snap);
         foreach (var editor in _editors.Values) editor.SetSnapshot(snap);
         if (_dash.OnScreen) _dash.SetSnapshot(snap);
@@ -1033,6 +1088,7 @@ sealed class TrayContext : ApplicationContext, ISettingsHost
         Theme.Changed -= OnThemeChanged;
         Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
         _hotkeys.Dispose();
+        _awayWatcher?.Dispose();
         foreach (var icon in _icons.Values)
         {
             icon.Visible = false;

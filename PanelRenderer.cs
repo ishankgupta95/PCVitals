@@ -42,6 +42,8 @@ sealed class PanelRenderer : IDisposable
         public string Number = "", Unit = "";
         public float? Fraction;
         public Color Accent, ValueColor;
+        /// <summary>The tile's own accent before a temperature threshold recolours it (steady, so the still layer can use it).</summary>
+        public Color BaseAccent;
         public float[]? Graph;
         public float? GraphMax;
         /// <summary>The number as a value, when it can glide between readings (re-formatted as it moves).</summary>
@@ -66,7 +68,7 @@ sealed class PanelRenderer : IDisposable
         for (int i = 0; i < _layout.Tiles.Count; i++)
         {
             var tile = _layout.Tiles[i];
-            var st = new TileState { ValueColor = PanelColor.Parse(tile.ValueColor) ?? valueColor, Accent = Theme.TextDim };
+            var st = new TileState { ValueColor = PanelColor.Parse(tile.ValueColor) ?? valueColor, Accent = Theme.TextDim, BaseAccent = Theme.TextDim };
             frame.Tiles.Add(st);
             switch (tile.Kind)
             {
@@ -90,7 +92,7 @@ sealed class PanelRenderer : IDisposable
             var r = snap != null ? PanelSources.Read(tile, snap, _settings) : null;
             st.Reading = r;
             st.Label = tile.Label ?? r?.Label ?? Fallback(tile);
-            st.Accent = PanelColor.Parse(tile.AccentColor) ?? PanelColor.Parse(_layout.Style.AccentColor) ?? r?.Accent ?? Theme.TextDim;
+            st.Accent = st.BaseAccent = PanelColor.Parse(tile.AccentColor) ?? PanelColor.Parse(_layout.Style.AccentColor) ?? r?.Accent ?? Theme.TextDim;
             if (r == null)
             {
                 st.Number = "--";
@@ -194,19 +196,20 @@ sealed class PanelRenderer : IDisposable
 
     /// <summary>Identifies the cached layer: it is redrawn when this changes.</summary>
     internal string StaticKey(Frame frame, Size canvas, float scale, Point origin, bool fill) =>
-        $"{canvas}|{scale}|{origin}|{fill}|{Theme.Bg.ToArgb()}|{Theme.Text.ToArgb()}|" + string.Join("\u0001", frame.Tiles.Select(t => t.Label));
+        $"{canvas}|{scale}|{origin}|{fill}|{Theme.Bg.ToArgb()}|{Theme.Text.ToArgb()}|{Theme.Border.ToArgb()}|" + string.Join("\u0001", frame.Tiles.Select(t => t.Label))
+        + (_layout.Style.TileBorder == PanelTileBorder.Accent ? "|" + string.Join(",", frame.Tiles.Select(t => t.BaseAccent.ToArgb())) : "");
 
     /// <summary>
     /// The parts that don't change between readings, in a new premultiplied bitmap. Without
     /// <paramref name="background"/> the panel's colour and gradient are left out (the GPU renderer draws and animates them).
     /// </summary>
-    internal Bitmap RenderStatic(Frame frame, Size canvas, float scale, Point origin, bool fill, bool background)
+    internal Bitmap RenderStatic(Frame frame, Size canvas, float scale, Point origin, bool fill, bool background, bool picture = true)
     {
         var bmp = new Bitmap(Math.Max(1, canvas.Width), Math.Max(1, canvas.Height), PixelFormat.Format32bppPArgb);
         using var sg = Graphics.FromImage(bmp);
         Setup(sg);
         sg.Clear(Color.Transparent);
-        DrawStatic(sg, frame, canvas, scale, origin, fill, background);
+        DrawStatic(sg, frame, canvas, scale, origin, fill, background, picture);
         return bmp;
     }
 
@@ -227,7 +230,7 @@ sealed class PanelRenderer : IDisposable
 
     string FamilyOf(PanelTile t) => string.IsNullOrWhiteSpace(t.FontFamily) ? _layout.Style.FontFamily : t.FontFamily!;
 
-    void DrawStatic(Graphics g, Frame frame, Size canvas, float scale, Point origin, bool fill, bool background)
+    void DrawStatic(Graphics g, Frame frame, Size canvas, float scale, Point origin, bool fill, bool background, bool picture = true)
     {
         var style = _layout.Style;
         int alpha = Math.Clamp(style.BackgroundOpacity, 0, 100) * 255 / 100;
@@ -242,7 +245,7 @@ sealed class PanelRenderer : IDisposable
                 using (var path = Gfx.RoundedPath(area, radius))
                     g.FillPath(brush, path);
         }
-        if (PanelImages.Get(style.BackgroundImage) is { } picture)
+        if (picture && PanelImages.Get(style.BackgroundImage) is { } backdrop)
         {
             var size = PanelGrid.PanelSize(_layout, scale);
             var area = fill ? new Rectangle(Point.Empty, canvas) : new Rectangle(origin, size);
@@ -250,7 +253,7 @@ sealed class PanelRenderer : IDisposable
             if (!fill)
                 using (var clip = Gfx.RoundedPath(area, radius))
                     g.SetClip(clip);
-            PanelImages.Draw(g, picture, area, style.BackgroundFit);
+            PanelImages.Draw(g, backdrop, area, style.BackgroundFit);
             g.Restore(state);
         }
 
@@ -265,6 +268,8 @@ sealed class PanelRenderer : IDisposable
             var r = TileRect(i, scale, origin);
             if (style.TileBackgrounds && tileAlpha > 0 && tile.Kind is not (PanelTileKind.Divider or PanelTileKind.Image))
                 Gfx.FillRounded(g, r, Math.Max(2, radius * 2 / 3), Theme.WithAlpha(tileBg, tileAlpha));
+            if (style.TileBorder != PanelTileBorder.None && tile.Kind is not (PanelTileKind.Divider or PanelTileKind.Image))
+                DrawTileBorder(g, r, Math.Max(2, radius * 2 / 3), style, scale, st.BaseAccent);
 
             switch (tile.Kind)
             {
@@ -301,6 +306,29 @@ sealed class PanelRenderer : IDisposable
             if (m.Ring is { } ring)
                 DrawGauge(g, tile.GaugeStyle, ring, m.RingWidth, 1, Theme.Track);
         }
+    }
+
+    /// <summary>The outline of a tile card: inside the card's edge, following its corners.</summary>
+    static void DrawTileBorder(Graphics g, Rectangle r, int radius, PanelStyle style, float scale, Color accent)
+    {
+        float width = Math.Max(1, (float)Math.Round(Math.Clamp(style.TileBorderWidth, 1, 4) * scale));
+        var colour = style.TileBorder == PanelTileBorder.Accent ? accent : Theme.Border;
+        // The pen is centred on its path, so the path sits half a width inside the card's edge.
+        var box = new RectangleF(r.Left + width / 2, r.Top + width / 2, r.Width - width, r.Height - width);
+        if (box.Width <= 0 || box.Height <= 0) return;
+        float rad = Math.Max(0, radius - width / 2), d = Math.Min(rad * 2, Math.Min(box.Width, box.Height));
+        using var pen = new Pen(colour, width) { LineJoin = LineJoin.Round };
+        using var path = new GraphicsPath();
+        if (d <= 0) path.AddRectangle(box);
+        else
+        {
+            path.AddArc(box.Left, box.Top, d, d, 180, 90);
+            path.AddArc(box.Right - d, box.Top, d, d, 270, 90);
+            path.AddArc(box.Right - d, box.Bottom - d, d, d, 0, 90);
+            path.AddArc(box.Left, box.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+        }
+        g.DrawPath(pen, path);
     }
 
     /// <summary>The panel's background: its colour, or a gradient from it (still; the GPU renderer can animate it).</summary>

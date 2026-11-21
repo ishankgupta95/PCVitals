@@ -36,6 +36,14 @@ sealed class GpuPanelRenderer : IDisposable
         public Bitmap? Static;
         public Color Background, GradientEnd;
         public int IntervalMs = 1000;
+        /// <summary>The background picture is an animated GIF this renderer draws itself (it is left out of <see cref="Static"/>).</summary>
+        public bool AnimatedPicture;
+
+        /// <summary>Where the background picture goes: the whole display, or the panel.</summary>
+        public RectangleF PictureArea => Fill ? new RectangleF(0, 0, Canvas.Width, Canvas.Height) : new RectangleF(Origin, PanelGrid.PanelSize(Layout, Scale));
+
+        /// <summary>Corner rounding the picture is clipped to (none when it fills the display).</summary>
+        public float PictureRadius => Fill ? 0 : (float)Math.Round(Layout.Style.CornerRadius * Scale);
     }
 
     /// <summary>One tile's animation from the previous reading to the newest.</summary>
@@ -50,6 +58,7 @@ sealed class GpuPanelRenderer : IDisposable
     Tween[] _tweens = Array.Empty<Tween>();
     double _arrived; // seconds, when the newest reading came in
     ID2D1Bitmap1? _static;
+    readonly GpuGifLayer _gif = new();
     ID2D1SolidColorBrush? _brush;
     ID2D1DeviceContext1? _dc1;
     ID2D1StrokeStyle? _roundCaps, _roundJoins;
@@ -155,6 +164,9 @@ sealed class GpuPanelRenderer : IDisposable
 
     public int FrameRate => _job?.Layout.Style.FrameRate ?? 60;
 
+    /// <summary>When only an animated picture moves: seconds until its next frame (the next draw can wait that long); otherwise 0.</summary>
+    public double IdleSeconds { get; private set; }
+
     /// <summary>Whether the renderer has a still layer for the current device (after a device loss it doesn't).</summary>
     public bool HasStatic => _static != null;
 
@@ -195,6 +207,7 @@ sealed class GpuPanelRenderer : IDisposable
         _tweens = tweens;
         _arrived = now;
         _job = job;
+        _gif.Update(job);
         if (job.Static != null)
         {
             _static?.Dispose();
@@ -207,6 +220,7 @@ sealed class GpuPanelRenderer : IDisposable
     /// <summary>The GPU was lost: drop everything that lived on it.</summary>
     public void ReleaseDevice()
     {
+        _gif.Release();
         _static?.Dispose();
         _static = null;
         _brush?.Dispose();
@@ -255,6 +269,7 @@ sealed class GpuPanelRenderer : IDisposable
 
         var style = job.Layout.Style;
         DrawBackground(dc, job, now);
+        bool animatedPicture = job.AnimatedPicture && _gif.Draw(surface, job, now);
         if (_static != null) dc.DrawBitmap(_static, 1, Vortice.Direct2D1.BitmapInterpolationMode.NearestNeighbor);
 
         bool gliding = style.Motion != PanelMotion.Off && now - _arrived < GlideSeconds(job);
@@ -309,7 +324,10 @@ sealed class GpuPanelRenderer : IDisposable
         _sparks.EndFrame();
         _arcs.EndFrame();
         _arcPaths.EndFrame();
-        return gliding || scrolling || (style.AnimateBackground && style.Gradient != PanelGradient.None);
+        bool other = gliding || scrolling || (style.AnimateBackground && style.Gradient != PanelGradient.None);
+        // With only the picture moving, nothing needs drawing between its frame changes.
+        IdleSeconds = animatedPicture && !other ? _gif.SecondsToNextFrame(now, 1.0 / Math.Clamp(style.FrameRate, 10, 240)) : 0;
+        return other || animatedPicture;
     }
 
     static int GraphSlots(PanelTile t, Job job) => Math.Clamp(t.GraphSeconds * 1000 / Math.Max(250, job.IntervalMs), 10, HardwareService.LongHistoryLength);
@@ -673,6 +691,18 @@ sealed class GpuPanelHost : IDisposable
         _wake.Set();
     }
 
+    int _failNext, _surfacesMade;
+
+    /// <summary>Tests: GPU surfaces made so far (a recovery makes a new one).</summary>
+    internal int SurfacesMade => Volatile.Read(ref _surfacesMade);
+
+    /// <summary>Tests: makes the next frame fail the way a lost GPU (driver reset, sleep) does.</summary>
+    internal void SimulateDeviceLoss()
+    {
+        Interlocked.Exchange(ref _failNext, 1);
+        _wake.Set();
+    }
+
     /// <summary>The panel was hidden: let go of the GPU surface until the next reading.</summary>
     public void Suspend()
     {
@@ -716,6 +746,7 @@ sealed class GpuPanelHost : IDisposable
                     if (surface == null)
                     {
                         surface = new GpuSurface(_hwnd, job.Canvas);
+                        Interlocked.Increment(ref _surfacesMade);
                         if (job.Static == null) StaticLost?.Invoke();
                     }
                     surface.Resize(job.Canvas);
@@ -727,6 +758,7 @@ sealed class GpuPanelHost : IDisposable
                     continue;
                 }
                 moving = renderer.Draw(surface);
+                if (Interlocked.Exchange(ref _failNext, 0) == 1) throw new InvalidOperationException("simulated GPU loss (test)");
                 if (!surface.Present()) throw new InvalidOperationException("GPU device lost");
                 failures = 0;
             }
@@ -747,7 +779,7 @@ sealed class GpuPanelHost : IDisposable
                 // Pace to the panel's frame rate with a high-resolution timer; a new reading wakes it early.
                 int fps = Math.Clamp(renderer.FrameRate, 10, 240);
                 double now = renderer.Now;
-                next = Math.Max(next + 1.0 / fps, now);
+                next = renderer.IdleSeconds > 0 ? now + renderer.IdleSeconds : Math.Max(next + 1.0 / fps, now);
                 if (next - now > 0.0005) timer.Wait(next - now, _wake);
             }
         }

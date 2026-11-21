@@ -172,3 +172,19 @@ public class HistoryStoreTests
         Assert.Equal("ram", Assert.Single(series).Key);
     }
 }
+
+public class PollerQosTests
+{
+    [Fact]
+    public void Leaves_efficiency_mode_when_busy_or_late_and_returns_after_calm()
+    {
+        var qos = new HardwareService.PollerQos();
+        Assert.Null(qos.Next(20, 1000, 1000));          // idle and on time: stays efficient
+        Assert.False(qos.Next(95, 1000, 1000));         // a full load: out of efficiency mode at once
+        Assert.Null(qos.Next(95, 1000, 1000));          // (no change to report while it stays busy)
+        for (int i = 0; i < 9; i++) Assert.Null(qos.Next(10, 1000, 1000)); // nine calm polls aren't enough
+        Assert.True(qos.Next(10, 1000, 1000));          // the tenth puts it back
+        Assert.False(qos.Next(30, 2600, 1000));         // a late poll counts as busy even at low load
+        for (int i = 0; i < 12; i++) Assert.Null(qos.Next(60, 1000, 1000)); // 50-75 %: neither busy nor calm
+    }
+}

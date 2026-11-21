@@ -23,6 +23,8 @@ sealed class DesktopPanel : Form
     /// <summary>How the current window handle was made (decided when it is created).</summary>
     bool _gpu;
     GpuPanelHost? _host;
+    /// <summary>Tests: the GPU render thread, when drawing on the GPU.</summary>
+    internal GpuPanelHost? GpuHost => _host;
     PanelLayout? _gpuLayout;
     string? _gpuStaticKey;
     Size _gpuSize;
@@ -38,6 +40,8 @@ sealed class DesktopPanel : Form
     Point _downScreen, _downPos;
 
     public PanelLayout Layout { get; private set; }
+    /// <summary>The real panel in settings while <see cref="Layout"/> is a merged scene copy (see <see cref="SceneSwitcher.Merge"/>); null otherwise.</summary>
+    public PanelLayout? Home { get; set; }
     /// <summary>A tile was clicked: the dashboard page for its device.</summary>
     public event Action<string?>? TileClicked;
     public event Action<Point>? MenuRequested;
@@ -132,6 +136,33 @@ sealed class DesktopPanel : Form
         Redraw(force: true);
     }
 
+    AwayState? _away;
+    bool _pausedApplied;
+
+    /// <summary>Locked / display-off state shared by the app's panels; set once, right after creating the panel.</summary>
+    public AwayState? Away
+    {
+        get => _away;
+        set
+        {
+            if (_away != null) _away.Changed -= OnAwayChanged;
+            _away = value;
+            if (_away != null) _away.Changed += OnAwayChanged;
+        }
+    }
+
+    /// <summary>True while the panel is deliberately not drawing because nobody is there to see it.</summary>
+    public bool Paused => _away is { IsAway: true } && Layout.Style.PauseWhenAway;
+
+    /// <summary>Frames handed to the GPU or drawn with GDI+ so far (for tests: none may happen while paused).</summary>
+    internal int DrawCount { get; private set; }
+
+    /// <summary>Pauses (or, forced, resumes with a full redraw: the GPU surface and still layer were released).</summary>
+    void OnAwayChanged()
+    {
+        if (!IsDisposed && Layout.Enabled) Redraw(force: true);
+    }
+
     public void SetSnapshot(Snapshot snap)
     {
         _snap = snap;
@@ -141,6 +172,17 @@ sealed class DesktopPanel : Form
     /// <summary>Redraws if anything it shows changed (or always, with <paramref name="force"/>).</summary>
     public void Redraw(bool force = false)
     {
+        // Nobody can see the desktop: let go of the GPU and draw nothing until they are back.
+        if (Paused)
+        {
+            if (!_pausedApplied)
+            {
+                _pausedApplied = true;
+                HidePanel();
+            }
+            return;
+        }
+        _pausedApplied = false;
         var screen = FindScreen();
         if (!Layout.Enabled || _snap == null || screen == null || (Layout.HideInFullscreen && Native.FullscreenAppOn(screen)))
         {
@@ -157,6 +199,7 @@ sealed class DesktopPanel : Form
         _scale = scale;
         _origin = origin;
         _pos = pos;
+        DrawCount++;
 
         if (!IsHandleCreated) _gpu = WantsGpu; // the window is made by Show() below, the way this says
         if (_gpu)
@@ -215,11 +258,13 @@ sealed class DesktopPanel : Form
 
         var layout = _gpuLayout ??= Layout.Clone();
         bool fill = Layout.FillDisplay;
-        var key = _renderer.StaticKey(frame, size, scale, origin, fill) + "|" + Layout.Locked;
+        // An animated GIF is drawn by the render thread under the still layer, so the still layer leaves the picture out.
+        bool gif = GifBackground.Wants(Layout.Style);
+        var key = _renderer.StaticKey(frame, size, scale, origin, fill) + "|" + Layout.Locked + "|" + gif;
         Bitmap? still = null;
         if (key != _gpuStaticKey)
         {
-            still = _renderer.RenderStatic(frame, size, scale, origin, fill, background: false);
+            still = _renderer.RenderStatic(frame, size, scale, origin, fill, background: false, picture: !gif);
             _gpuStaticKey = key;
         }
         int alpha = Math.Clamp(Layout.Style.BackgroundOpacity, 0, 100) * 255 / 100;
@@ -227,7 +272,7 @@ sealed class DesktopPanel : Form
         _host.Post(new GpuPanelRenderer.Job
         {
             Layout = layout, Frame = frame, Canvas = size, Scale = scale, Origin = origin, Fill = fill, Static = still,
-            Background = bg, GradientEnd = Theme.WithAlpha(PanelColor.GradientEnd(Layout.Style, bg), alpha), IntervalMs = _settings.IntervalMs,
+            Background = bg, GradientEnd = Theme.WithAlpha(PanelColor.GradientEnd(Layout.Style, bg), alpha), IntervalMs = _settings.IntervalMs, AnimatedPicture = gif,
         });
     }
 
@@ -399,6 +444,13 @@ sealed class DesktopPanel : Form
         Layout.Monitor = screen.DeviceName;
         Layout.MonitorSize = screen.Bounds.Size;
         Layout.Position = new Point(_pos.X - screen.Bounds.Left, _pos.Y - screen.Bounds.Top);
+        if (Home != null)
+        {
+            // Showing a scene: Layout is a merged copy, so the real panel in settings gets the position too.
+            Home.Monitor = Layout.Monitor;
+            Home.MonitorSize = Layout.MonitorSize;
+            Home.Position = Layout.Position;
+        }
         _settings.Save();
     }
 
@@ -406,6 +458,7 @@ sealed class DesktopPanel : Form
     public void ResetPosition()
     {
         Layout.Position = null;
+        if (Home != null) Home.Position = null;
         Redraw(force: true);
     }
 
@@ -426,6 +479,7 @@ sealed class DesktopPanel : Form
         {
             if (_foregroundHook != IntPtr.Zero) Native.UnhookWinEvent(_foregroundHook);
             _foregroundHook = IntPtr.Zero;
+            Away = null;
             _clock.Dispose();
             _renderer.Dispose();
             _surface?.Dispose();

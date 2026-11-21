@@ -91,6 +91,10 @@ public sealed class PanelStyle
     /// <summary>How solid the tile cards are, in percent: 100 solid, lower lets the background (gradient, picture) show through.</summary>
     public int TileOpacity { get; set; } = 100;
     public int CornerRadius { get; set; } = 10;
+    /// <summary>An outline around each tile card.</summary>
+    public PanelTileBorder TileBorder { get; set; }
+    /// <summary>Outline thickness in pixels at 100 % size (1 to 4).</summary>
+    public int TileBorderWidth { get; set; } = 1;
     public string FontFamily { get; set; } = "Segoe UI";
     /// <summary>A picture behind the tiles: file name in the panels folder (<see cref="PanelImages"/>).</summary>
     public string? BackgroundImage { get; set; }
@@ -114,8 +118,20 @@ public sealed class PanelStyle
     public bool Glow { get; set; }
     /// <summary>Bars and gauges shade from a dim to a bright accent along their length.</summary>
     public bool GradientFills { get; set; }
+    /// <summary>Stop drawing while the session is locked or the display is off (nobody can see the panel).</summary>
+    public bool PauseWhenAway { get; set; } = true;
 
     public PanelStyle Clone() => (PanelStyle)MemberwiseClone();
+}
+
+/// <summary>The outline drawn around each tile card.</summary>
+public enum PanelTileBorder
+{
+    None,
+    /// <summary>The theme's border colour.</summary>
+    Subtle,
+    /// <summary>Each tile's own accent colour (CPU blue, GPU green...).</summary>
+    Accent,
 }
 
 /// <summary>How the panel's background colour is shaded.</summary>
@@ -235,6 +251,12 @@ public sealed class PanelLayout
     public int Width { get; set; } = 400;
     public int Height { get; set; } = 240;
 
+    /// <summary>The panel (by <see cref="Id"/>) whose layout this one shows while the PC is busy; null for none. See <see cref="SceneSwitcher"/>.</summary>
+    public string? SceneId { get; set; }
+    public SceneTrigger SceneTrigger { get; set; }
+    /// <summary>Percent, for the GPU and CPU triggers.</summary>
+    public int SceneThreshold { get; set; } = 60;
+
     public PanelStyle Style { get; set; } = new();
     public List<PanelTile> Tiles { get; set; } = new();
 
@@ -260,7 +282,10 @@ public sealed class PanelLayout
         FreePlacement = preset.FreePlacement;
         Width = preset.Width;
         Height = preset.Height;
+        // "Pause when away" is about the window, not the look: a new layout keeps the panel's choice.
+        bool pause = Style.PauseWhenAway;
         Style = preset.Style.Clone();
+        Style.PauseWhenAway = pause;
         Tiles = preset.Tiles.Select(t => t.Clone()).ToList();
     }
 }

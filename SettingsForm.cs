@@ -649,6 +649,28 @@ sealed class SettingsForm : Form
         BuildPanelBody(p);
     }
 
+    /// <summary>Scenes: while the PC is busy, this panel shows another panel's layout (see <see cref="SceneSwitcher"/>).</summary>
+    void AddSceneSettings(FlowLayoutPanel p, PanelLayout current)
+    {
+        if (_s.Panels.Count == 0) return;
+        p.Controls.Add(Section("Scenes"));
+        var others = _s.Panels.Where(x => x != current).ToList();
+        var choices = new[] { "Off" }.Concat(others.Select(x => x.Name)).ToArray();
+        int chosen = Math.Max(0, others.FindIndex(x => x.Id == current.SceneId) + 1);
+        p.Controls.Add(new Card("Switch layout when busy", "Make a second panel with the layout you want, then pick it here. This panel keeps its own place on screen, and shows that layout while the PC is busy.",
+                                Combo(choices, chosen, 220, i => EditedPanel.SceneId = i == 0 ? null : others[i - 1].Id), ""));
+        if (others.Count == 0)
+            p.Controls.Add(Hint("There is no other panel yet: use Add panel at the top of this page."));
+        var triggers = new[] { SceneTrigger.GpuUsage, SceneTrigger.CpuUsage, SceneTrigger.Fullscreen };
+        p.Controls.Add(new Card("When", "Switches after it has held for 5 seconds, and back once it has been calm for 15.",
+                                Combo(new[] { "GPU usage above", "CPU usage above", "Fullscreen game or video" }, Math.Max(0, Array.IndexOf(triggers, current.SceneTrigger)), 220,
+                                      i => EditedPanel.SceneTrigger = triggers[i]), ""));
+        var thresholds = new[] { 50, 60, 70, 80 };
+        p.Controls.Add(new Card("Threshold", "For GPU and CPU usage. A fullscreen game or video is one that covers the main display.",
+                                Combo(thresholds.Select(t => t + "%").ToArray(), Math.Max(0, Array.IndexOf(thresholds, current.SceneThreshold)), 100,
+                                      i => EditedPanel.SceneThreshold = thresholds[i]), ""));
+    }
+
     void BuildPanelBody(FlowLayoutPanel p)
     {
         var current = PanelOrDefault;
@@ -713,6 +735,8 @@ sealed class SettingsForm : Form
         }
         p.Controls.Add(gallery);
 
+        AddSceneSettings(p, current);
+
         p.Controls.Add(Section("Window"));
         var modes = new[] { PanelMode.AlwaysOnTop, PanelMode.Normal, PanelMode.Desktop };
         p.Controls.Add(new Card("Placement", "On the desktop, the panel stays behind your windows and comes back into view when you show the desktop (Windows+D).",
@@ -762,7 +786,7 @@ sealed class SettingsForm : Form
         p.Controls.Add(new Card("Gradient direction", "For linear gradients.",
                                 Combo(directions, Math.Max(0, Array.IndexOf(angles, current.Style.GradientAngle)), 190, i => EditedPanel.Style.GradientAngle = angles[i]), ""));
         p.Controls.Add(new Card("Background picture", current.Style.BackgroundImage == null
-                                    ? "A picture behind the readings (PNG, JPG, BMP or GIF). The background colour tints it if it has see-through parts."
+                                    ? "A picture behind the readings (PNG, JPG, BMP or GIF). An animated GIF plays on the panel when drawing with the graphics card and Motion is not Off. The background colour tints it if it has see-through parts."
                                     : "Shown behind the readings. Fit decides how it covers the panel.",
                                 PictureSetting(current), ""));
         // Solid cards hide whatever is behind them; see-through lets a gradient or picture show around the numbers.
@@ -773,6 +797,7 @@ sealed class SettingsForm : Form
                                     EditedPanel.Style.TileBackgrounds = i != 2;
                                     EditedPanel.Style.TileOpacity = i == 1 ? SeeThroughTiles : 100;
                                 }), ""));
+        p.Controls.Add(TileBordersCard(current));
 
         p.Controls.Add(Section("Colours"));
         p.Controls.Add(new Card("Labels", null, ColorSetting(current.Style.LabelColor, () => Theme.TextDim, c => EditedPanel.Style.LabelColor = c), ""));
@@ -809,6 +834,21 @@ sealed class SettingsForm : Form
                                 Toggle(current.Style.Glow, v => EditedPanel.Style.Glow = v), ""));
         p.Controls.Add(new Card("Shaded bars and gauges", "Bars and gauges shade from dim at the empty end to full colour at the reading.",
                                 Toggle(current.Style.GradientFills, v => EditedPanel.Style.GradientFills = v), ""));
+        p.Controls.Add(new Card("Pause when away", "Stops drawing while the screen is locked or the display is off, and carries on the moment you are back. Readings keep being collected.",
+                                Toggle(current.Style.PauseWhenAway, v => EditedPanel.Style.PauseWhenAway = v), ""));
+    }
+
+    /// <summary>Outline around each tile card: none, the theme's border colour, or each tile's own colour, and how thick.</summary>
+    Card TileBordersCard(PanelLayout current)
+    {
+        var widths = new[] { 1, 2, 3, 4 };
+        var kind = Combo(new[] { "None", "Subtle", "Accent colour" }, (int)current.Style.TileBorder, 150, i => EditedPanel.Style.TileBorder = (PanelTileBorder)i);
+        kind.AccessibleName = "Tile border style";
+        var width = Combo(widths.Select(w => w + " px").ToArray(), Math.Max(0, Array.IndexOf(widths, current.Style.TileBorderWidth)), 90,
+                          i => EditedPanel.Style.TileBorderWidth = widths[i]);
+        width.AccessibleName = "Tile border thickness";
+        return new Card("Tile borders", "An outline around each reading. Subtle uses the theme's border colour; Accent colour uses each reading's own colour (CPU blue, GPU green…).",
+                        new AccessoryRow(kind, width), "");
     }
 
     /// <summary>Tile card opacity for "See-through" (percent of the solid card).</summary>

@@ -19,7 +19,7 @@ public sealed class PanelTests : IDisposable
     };
 
     /// <summary>A desktop with two GPUs, drives and fans, or a bare one with no GPU at all.</summary>
-    static Snapshot Snap(bool full, bool battery = false)
+    internal static Snapshot Snap(bool full, bool battery = false)
     {
         var gpus = full ? new[] { Gpu("/gpu-nvidia/0"), Gpu("/gpu-amd/0", integrated: true) } : Array.Empty<GpuSummary>();
         var summary = new Summary
@@ -97,6 +97,46 @@ public sealed class PanelTests : IDisposable
             Assert.Equal(id, l.Preset);
             // Nothing that this PC can't read.
             Assert.All(l.Tiles.Where(t => t.Kind == PanelTileKind.Value), t => Assert.NotNull(PanelSources.Read(t, snap, null)));
+        }
+    }
+
+    [Theory]
+    [InlineData("case-glance", true, false)]
+    [InlineData("case-glance", false, false)]
+    [InlineData("case-dashboard", true, true)]
+    [InlineData("case-dashboard", false, false)]
+    [InlineData("case-full", true, true)]
+    [InlineData("case-full", true, false)]
+    [InlineData("case-full", false, false)]
+    public void Case_screen_presets_keep_the_portrait_shape_and_fit_their_grid(string id, bool full, bool battery)
+    {
+        var l = PanelPresets.Build(id, Snap(full, battery));
+        var size = PanelGrid.PanelSize(l, 1);
+        Assert.InRange(size.Width / (double)size.Height, 720.0 / 1600 * 0.97, 720.0 / 1600 * 1.03);
+        Assert.Empty(PanelGrid.Problems(l));
+        // Every tile lies inside the panel and none overlaps another, as drawn.
+        var bounds = new Rectangle(Point.Empty, size);
+        var rects = l.Tiles.Select(t => PanelGrid.TileRect(l, t, 1)).ToList();
+        Assert.All(rects, r => Assert.True(bounds.Contains(r)));
+        for (int i = 0; i < rects.Count; i++)
+            for (int j = 0; j < i; j++)
+                Assert.False(rects[i].IntersectsWith(rects[j]), $"tiles {i} and {j} overlap");
+    }
+
+    [Fact]
+    public void Case_screen_presets_are_half_size_so_fill_scales_them_by_two()
+    {
+        foreach (var id in new[] { "case-glance", "case-dashboard", "case-full" })
+        {
+            var l = PanelPresets.Build(id, null);
+            var size = PanelGrid.PanelSize(l, 1);
+            Assert.InRange(size.Width, 355, 365);
+            Assert.InRange(size.Height, 790, 810);
+            // "Fill the display" on a 720 × 1600 screen: the uniform fit.
+            float fit = Math.Min(720f / size.Width, 1600f / size.Height);
+            Assert.InRange(fit, 1.95f, 2.05f);
+            Assert.Equal(PanelGradient.Radial, l.Style.Gradient);
+            Assert.True(l.Style.TileOpacity < 100);
         }
     }
 
@@ -256,6 +296,38 @@ public sealed class PanelTests : IDisposable
         panel.Apply(other);
         panel.SetSnapshot(Snap(full: true));
         panel.AllowClose = true;
+    }
+
+    [Fact]
+    public void Gpu_panel_recovers_after_losing_the_gpu()
+    {
+        // A driver update, a GPU reset or sleep loses the Direct3D device: the panel must make a new surface,
+        // get its still layer again from the UI thread, and carry on drawing without help.
+        if (!GpuSurface.Probe()) return; // no GPU here (CI): nothing to test
+        var layout = PanelPresets.Build("graphs", Snap(full: true));
+        layout.Enabled = true;
+        layout.HideInFullscreen = false;
+        layout.Position = new Point(0, 0);
+        using var panel = new DesktopPanel(AppSettings.CreateDefault(), layout, null) { AllowClose = true };
+        panel.SetSnapshot(Snap(full: true));
+
+        bool Pump(Func<bool> until)
+        {
+            var end = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < end)
+            {
+                Application.DoEvents();
+                if (until()) return true;
+                Thread.Sleep(10);
+            }
+            return false;
+        }
+
+        Assert.True(Pump(() => panel.GpuHost?.SurfacesMade == 1), "first surface");
+        int draws = panel.DrawCount;
+        panel.GpuHost!.SimulateDeviceLoss();
+        Assert.True(Pump(() => panel.GpuHost.SurfacesMade == 2 && panel.DrawCount > draws), "surface remade and redrawn after the loss");
+        Assert.True(panel.Visible);
     }
 
     [Fact]

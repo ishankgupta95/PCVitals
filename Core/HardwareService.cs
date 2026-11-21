@@ -231,10 +231,19 @@ public sealed class HardwareService : IDisposable
 
     void Loop()
     {
-        PreferEfficiency();
+        var qos = new PollerQos();
+        SetEfficiency(true);
+        long lastStart = 0;
+        int polls = 0;
         while (_running)
         {
             var started = Environment.TickCount64;
+            // Under a full load (a render, a compile) an EcoQoS thread waits seconds for a turn unless PC Vitals has the
+            // focus, so readings froze. While the PC is busy, or a poll ran late, the poller leaves efficiency mode.
+            // The first polls open the hardware and take seconds anyway; judge lateness from the third on.
+            if (++polls > 2 && qos.Next(Latest?.Summary.CpuLoad, started - lastStart, IntervalMs) is { } efficient)
+                SetEfficiency(efficient);
+            lastStart = started;
             Snapshot? snap = null;
             try
             {
@@ -510,18 +519,48 @@ public sealed class HardwareService : IDisposable
     }
 
     /// <summary>
-    /// EcoQoS for the poll thread (Windows 11): background work that may run slower, on efficiency cores
-    /// and at lower clocks, so polling doesn't raise CPU clocks or wake performance cores on a laptop.
+    /// On: EcoQoS for the poll thread (Windows 11), background work that may run slower, on efficiency cores and at
+    /// lower clocks, so polling doesn't raise CPU clocks or wake performance cores on an idle laptop. Off (while the
+    /// PC is busy): explicitly not throttled, at above-normal priority, so readings keep coming under a full load.
     /// </summary>
-    static void PreferEfficiency()
+    static void SetEfficiency(bool on)
     {
-        var state = new ThreadPowerThrottling { Version = 1, ControlMask = 1, StateMask = 1 }; // EXECUTION_SPEED on
+        var state = new ThreadPowerThrottling { Version = 1, ControlMask = 1, StateMask = on ? 1u : 0u }; // EXECUTION_SPEED
         try
         {
             if (!SetThreadInformation(GetCurrentThread(), 3 /* ThreadPowerThrottling */, ref state, Marshal.SizeOf<ThreadPowerThrottling>()))
                 LogOnce("ecoqos", $"EcoQoS unavailable for the sensor poller (error {Marshal.GetLastWin32Error()}).");
         }
         catch (EntryPointNotFoundException) { } // Windows 7/8
+        Thread.CurrentThread.Priority = on ? ThreadPriority.Normal : ThreadPriority.AboveNormal;
+    }
+
+    /// <summary>
+    /// Decides when the poller leaves and re-enters efficiency mode: out as soon as the CPU is busy (75 %+) or a poll
+    /// starts late; back only after ten calm, on-time polls (below 50 %), so it doesn't flip back and forth.
+    /// </summary>
+    internal sealed class PollerQos
+    {
+        bool _efficient = true;
+        int _calm;
+
+        /// <summary>The new mode when it should change, else null.</summary>
+        public bool? Next(float? cpuLoad, long sincePreviousStartMs, int intervalMs)
+        {
+            bool late = sincePreviousStartMs > intervalMs + Math.Max(300, intervalMs / 2);
+            bool busy = late || cpuLoad >= 75;
+            if (busy)
+            {
+                _calm = 0;
+                if (!_efficient) return null;
+                _efficient = false;
+                return false;
+            }
+            if (_efficient || cpuLoad >= 50) { _calm = 0; return null; }
+            if (++_calm < 10) return null;
+            _efficient = true;
+            return true;
+        }
     }
 
     [StructLayout(LayoutKind.Sequential)]

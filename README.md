@@ -36,8 +36,19 @@ for a dashboard of every sensor in your machine.
 ### Desktop panel
 - **A floating panel of readings** to leave on screen: numbers, bars, ring gauges and history graphs, with a clock
   and date. Switch it on in Settings → Desktop panel or from the tray icon's menu.
-- **Six ready-made layouts**: Compact, Gaming, Graphs, Gauges, Sidebar and Full system. Readings for devices your
-  PC doesn't have are left out.
+- **Nine ready-made layouts**: Compact, Gaming, Graphs, Gauges, Sidebar, Full system and three for a portrait case
+  screen (below). Readings for devices your PC doesn't have are left out.
+- **Three portrait layouts for a case screen** (made for a 6-inch 720 × 1600 display such as the Lian Li
+  Lancool 207 Digital, used as a second monitor with "Fill the display" on): *Case screen: glance* (a big clock,
+  four ring gauges and big numbers, readable across the room), *dashboard* (clock and date, usage and temperature
+  gauges, history graphs, memory, power and network) and *everything* (every reading). They are 9:20 tall, stay
+  that shape when readings your PC lacks are left out, and use a soft radial background with see-through cards.
+
+  <p>
+    <img src="docs/panel-case-glance.png" alt="Case screen: glance" width="200">
+    <img src="docs/panel-case-dashboard.png" alt="Case screen: dashboard" width="200">
+    <img src="docs/panel-case-full.png" alt="Case screen: everything" width="200">
+  </p>
 - **Layout editor** (right-click the panel → Edit layout): drag tiles from a palette onto the panel, move and
   resize them, and choose for each one:
   - **any reading**: CPU, GPU, memory, network, drives, battery… or any sensor in the dashboard;
@@ -59,9 +70,15 @@ for a dashboard of every sensor in your machine.
 - **Background gradients**: linear (in any of eight directions) or radial, from the background colour to a second
   colour of your choice.
 - **Background picture** from Settings → Desktop panel → Background (or the layout editor), filled, fitted,
-  stretched, tiled or centred.
+  stretched, tiled or centred. An **animated GIF** plays on the panel (drawn by the graphics card, with Motion on):
+  it is decoded once, kept as GPU frames (at most 64 MB: pictures smaller than the panel stay at their own size, and
+  very large ones drop every other frame or shrink) and paced by the frame rate. With Motion off, or with classic
+  CPU drawing, it shows its first frame.
 - **Tile backgrounds**: solid, **see-through** (the background colour, gradient or picture shows through the
   cards behind the readings) or off. Choosing a picture switches solid cards to see-through.
+- **Tile borders**: an outline around each tile card: none (the default), **subtle** (the theme's border colour) or
+  **accent** (each reading's own colour: CPU blue, GPU green...), 1 to 4 px thick, following the corner rounding
+  and the panel's size.
 - **Motion and effects** (Settings → Desktop panel → Motion and effects), drawn by the graphics card:
   - **Smooth** motion: numbers count, and bars, gauges and colours glide to each new reading.
   - **Full** motion: graphs also scroll continuously instead of stepping once per reading.
@@ -69,7 +86,16 @@ for a dashboard of every sensor in your machine.
   - **Glow** around bars, gauges and graph lines, and **shaded bars and gauges** (dim at the empty end, full
     colour at the reading).
   - **30 or 60 fps** while something moves. A still panel draws nothing between readings.
+  - **Pause when away** (on by default, per panel): while the screen is locked or the display is off, the panel
+    stops drawing altogether and lets go of the graphics card, then redraws the moment you unlock or the display
+    comes back. Readings keep being collected. A dimmed display still counts as visible.
   - Turn off "Draw with the graphics card" to go back to the classic CPU drawing (no animations).
+- **Scenes** (Settings → Desktop panel → Scenes): a panel can switch to another panel's layout while the PC is
+  busy, and back when it calms down: a quiet look for the desktop and big numbers for gaming, with nothing to touch.
+  Make a second panel with the layout you want (it can stay hidden), then pick it under "Switch layout when busy".
+  Choose what busy means (GPU usage above, CPU usage above, or a fullscreen game or video on the main display)
+  and the threshold (50 to 80 %). It switches after 5 seconds of busy and back after 15 seconds of calm, so it
+  doesn't flicker. The panel keeps its own display, position, size, mode and lock; only the tiles, grid and look change.
 - Drag it to move it, click a reading to open its page in the dashboard, right-click it for options. Any sensor
   can be added from its menu in the dashboard ("Add to the desktop panel").
 
@@ -229,9 +255,20 @@ How it stays light:
   1336×1220 panel with every tile changing each second, as a share of one core: **0.7 %** with motion off,
   **~4 %** with smooth motion, **~6.5 %** with full motion at 60 fps (the classic CPU drawing is 1.7 % with no
   animation). The graphics driver adds roughly 50 MB of private memory once a panel is on screen; turning off
-  "Draw with the graphics card" avoids it.
+  "Draw with the graphics card" avoids it. An animated GIF background redraws only when its picture changes frame
+  (at most the panel's frame rate): a 30-frame, 25 fps GIF on a 720×1600 panel measured about 1-3 % of one core, and
+  the frames add roughly the GIF's decoded size (up to the 64 MB cap) in graphics memory.
+- **Nothing drawn while away**: when the session is locked or the display is off (notifications from Windows, on
+  a message-only window), panels stop drawing and release the GPU surface, and resume with a full redraw on
+  return. A graphs panel with full motion, a moving gradient and 60 fps measured **~3.1 %** of one core in
+  use against **0.0 %** while away (10 s each, test harness). Sensor polling is unaffected.
 - **Cheap process list**: top processes come from one `NtQuerySystemInformation` call per refresh (no
   per-process handles), and only while a page that shows them is open.
+- **Efficient when idle, on time under load**: the sensor poller runs in Windows' efficiency mode (EcoQoS) so it
+  doesn't raise clocks on an idle PC. Under a full load (a render, a compile) Windows let such a thread wait
+  seconds for a turn, so readings froze until PC Vitals had the focus. The poller now leaves efficiency mode, at
+  above-normal priority, as soon as the CPU is 75 %+ busy or a poll starts late, and returns after ten calm polls.
+  With all 16 threads at 100 %, readings went from 22 of 28 arriving (gaps up to 6 s) to 27–28 of 28.
 - **Startup and footprint**: ReadyToRun (no JIT warm-up), invariant globalization (no ICU), non-concurrent
   workstation GC with `ConserveMemory`, and the working set is trimmed after startup and whenever the dashboard
   or settings close.
@@ -276,6 +313,9 @@ Found a bug? Please [open an issue](../../issues/new/choose) and attach the sens
 | `tests/PCVitals.Tests` | Unit tests (xUnit) |
 | `HoverCard.cs` | Detail card shown when hovering a taskbar item |
 | `DesktopPanel.cs` / `PanelRenderer.cs` | The desktop panel window, and its classic GDI+ drawing (also used for previews and the still layer) |
+| `GifBackground.cs` | Animated GIF backgrounds: frame decoding (with the memory cap) and the GPU frame player |
+| `Scenes.cs` | Scenes: when a panel switches to its busy layout (with hysteresis), and merging that layout with the panel's window options |
+| `Away.cs` | Pause when away: the locked / display-off state and the hidden window that hears about it from Windows |
 | `GpuSurface.cs` / `GpuPanelRenderer.cs` | The panel's GPU path: Direct2D + DirectComposition surface, the animating renderer and its render thread |
 | `DashboardForm.cs` / `DashboardView.cs` | The dashboard window (owner-drawn) |
 | `SettingsForm.cs` / `SettingsControls.cs` | Settings window and its toggle, card, dropdown and preview controls |
